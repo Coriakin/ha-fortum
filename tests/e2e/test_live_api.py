@@ -642,6 +642,51 @@ async def test_live_fetch_hourly_from_session_earliest_marker(
 
 
 @pytest.mark.e2e
+async def test_live_spot_prices_for_session_price_areas(
+    live_hass: HomeAssistant, e2e_settings: E2ESettings
+):
+    """Fetch spot prices for every price area discovered from the session."""
+    _, api_client, session_manager = await _authenticate_with_session_manager(
+        live_hass,
+        e2e_settings,
+    )
+
+    snapshot = session_manager.get_snapshot()
+    assert snapshot is not None, "Session snapshot missing after login"
+    assert snapshot.price_areas, "Session snapshot has no price areas"
+
+    with patch(
+        "custom_components.fortum.api.client.async_add_external_statistics"
+    ) as mock_add_statistics:
+        try:
+            price_points = await api_client.fetch_spot_prices_for_areas(
+                snapshot.price_areas
+            )
+        except Exception as exc:  # pragma: no cover - live diagnostics path
+            pytest.fail(
+                _format_error("Spot price fetch", exc)
+                + f" | price_areas={snapshot.price_areas}"
+            )
+
+    areas_with_prices = {point.area_code for point in price_points}
+    missing_areas = set(snapshot.price_areas) - areas_with_prices
+    assert not missing_areas, (
+        f"Spot price fetch returned no data for areas={sorted(missing_areas)}"
+    )
+    assert mock_add_statistics.call_count == len(snapshot.price_areas), (
+        "Price forecast statistics were not recorded for every price area"
+    )
+
+    _LOGGER.info(
+        "Spot prices fetched areas=%s points=%d first=%s last=%s",
+        snapshot.price_areas,
+        len(price_points),
+        price_points[0].date_time.isoformat(),
+        price_points[-1].date_time.isoformat(),
+    )
+
+
+@pytest.mark.e2e
 async def test_live_integration_setup_under_five_seconds(
     live_hass: HomeAssistant, e2e_settings: E2ESettings
 ):

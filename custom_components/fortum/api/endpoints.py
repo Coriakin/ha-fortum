@@ -169,6 +169,7 @@ class APIEndpoints:
                     "fromDate": from_date.isoformat(),
                     "toDate": to_date.isoformat(),
                     "resolution": resolution,
+                    "useCache": True,
                 }
             }
         }

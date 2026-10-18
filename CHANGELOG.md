@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
+## [4.5.7]
+
+### Changed
+- Fixed spot prices becoming unavailable after a Fortum API change.
+- Improved spot price error messages to include the underlying API error.
+
 ## [4.5.6]
 
 ### Changed

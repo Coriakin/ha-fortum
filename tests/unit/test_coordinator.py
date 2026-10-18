@@ -542,15 +542,6 @@ class TestSpotPriceSyncCoordinator:
 
         assert "API error" in str(exc_info.value)
 
-    async def test_async_update_data_none_response(
-        self, price_coordinator, mock_api_client
-    ):
-        """Test price update with None response."""
-        mock_api_client.fetch_spot_prices_for_areas.return_value = None
-
-        data = await price_coordinator._async_update_data()
-        assert data == []
-
     async def test_async_update_data_authentication_error(
         self,
         price_coordinator,

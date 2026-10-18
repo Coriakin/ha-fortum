@@ -60,8 +60,6 @@ class SpotPriceSyncCoordinator(DataUpdateCoordinator[list[SpotPricePoint]]):
             data = await self.api_client.fetch_spot_prices_for_areas(
                 snapshot.price_areas,
             )
-            if data is None:
-                data = []
             _LOGGER.debug(
                 "spot price refresh done records=%d elapsed=%.3fs",
                 len(data),

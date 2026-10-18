@@ -295,6 +295,68 @@ class TestFortumAPIClient:
         assert mock_add_stats.call_args.args[2][0]["min"] == 4.23
         assert mock_add_stats.call_args.args[2][0]["max"] == 4.50
 
+    async def test_fetch_spot_prices_for_areas_all_failed_keeps_error_details(
+        self, mock_hass, mock_auth_client
+    ):
+        """All-area failure should surface each area's underlying error."""
+        client = FortumAPIClient(mock_hass, mock_auth_client)
+        area_error = APIError("Server error (BAD_REQUEST): useCache required")
+
+        with (
+            patch.object(client, "_get", side_effect=area_error),
+            patch(
+                "custom_components.fortum.api.client.async_add_external_statistics"
+            ) as mock_add_stats,
+            pytest.raises(APIError) as exc_info,
+        ):
+            await client.fetch_spot_prices_for_areas(("FI",))
+
+        assert str(exc_info.value) == (
+            "Failed to fetch spot prices: "
+            "FI: Server error (BAD_REQUEST): useCache required"
+        )
+        assert exc_info.value.__cause__ is area_error
+        mock_add_stats.assert_not_called()
+
+    async def test_fetch_spot_prices_for_areas_partial_failure_returns_rest(
+        self, mock_hass, mock_auth_client
+    ):
+        """One failing area should not drop prices fetched for other areas."""
+        client = FortumAPIClient(mock_hass, mock_auth_client)
+        parsed_payload = [
+            {
+                "priceArea": "SE3",
+                "priceUnit": "SEK/kWh",
+                "spotPriceSeries": [
+                    {
+                        "atUTC": "2026-03-17T22:00:00.000Z",
+                        "spotPrice": {"total": 0.5},
+                    },
+                ],
+            }
+        ]
+
+        async def _get(url: str) -> Mock:
+            if "SE4" in url:
+                raise APIError("Server error (INTERNAL): boom")
+            return Mock()
+
+        with (
+            patch.object(client, "_get", side_effect=_get),
+            patch.object(
+                client,
+                "_parse_trpc_response",
+                return_value=parsed_payload,
+            ),
+            patch(
+                "custom_components.fortum.api.client.async_add_external_statistics"
+            ) as mock_add_stats,
+        ):
+            result = await client.fetch_spot_prices_for_areas(("SE3", "SE4"))
+
+        assert [point.area_code for point in result] == ["SE3"]
+        mock_add_stats.assert_called_once()
+
     async def test_fetch_spot_prices_for_areas_without_price_area_returns_empty(
         self, mock_hass, mock_auth_client
     ):

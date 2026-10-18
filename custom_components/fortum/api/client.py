@@ -1713,15 +1713,16 @@ class FortumAPIClient:
             return []
 
         all_price_data: list[SpotPricePoint] = []
-        errors: list[str] = []
+        errors: dict[str, APIError] = {}
         for area_code in price_areas:
-            area_price_data = await self._fetch_price_data_for_area(
-                area_code,
-                from_date,
-                to_date,
-            )
-            if area_price_data is None:
-                errors.append(area_code)
+            try:
+                area_price_data = await self._fetch_price_data_for_area(
+                    area_code,
+                    from_date,
+                    to_date,
+                )
+            except APIError as exc:
+                errors[area_code] = exc
                 continue
             if not area_price_data:
                 continue
@@ -1729,11 +1730,14 @@ class FortumAPIClient:
             self._record_price_forecast_statistics(area_code, area_price_data)
             all_price_data.extend(area_price_data)
 
-        if errors and not all_price_data:
-            raise APIError(
-                "Failed to fetch spot price data for configured price areas: "
-                + ", ".join(errors)
-            )
+        if errors:
+            details = "; ".join(f"{area}: {exc}" for area, exc in errors.items())
+            if not all_price_data:
+                first_error = next(iter(errors.values()))
+                raise APIError(
+                    f"Failed to fetch spot prices: {details}"
+                ) from first_error
+            _LOGGER.info("spot price fetch failed for some areas: %s", details)
 
         all_price_data.sort(key=lambda point: (point.date_time, point.area_code))
         return all_price_data
@@ -1743,7 +1747,7 @@ class FortumAPIClient:
         area_code: str,
         from_date: date_cls,
         to_date: date_cls,
-    ) -> list[SpotPricePoint] | None:
+    ) -> list[SpotPricePoint]:
         """Fetch spot prices for one explicit area code."""
         last_error: APIError | None = None
         for resolution in PRICE_RESOLUTIONS:
@@ -1811,8 +1815,7 @@ class FortumAPIClient:
                 last_error = exc
 
         if last_error is not None:
-            _LOGGER.info("price fetch failed area=%s error=%s", area_code, last_error)
-            return None
+            raise last_error
 
         _LOGGER.debug(
             "no price data records area=%s from_date=%s to_date=%s",

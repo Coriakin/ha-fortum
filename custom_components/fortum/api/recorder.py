@@ -17,7 +17,7 @@ from homeassistant.components.recorder.statistics import (
     statistics_during_period,
     valid_statistic_id,
 )
-from homeassistant.components.recorder.tasks import RecorderTask
+from homeassistant.components.recorder.tasks import CommitTask, RecorderTask
 from homeassistant.helpers.recorder import get_instance
 
 from ..exceptions import APIError
@@ -35,6 +35,9 @@ if TYPE_CHECKING:
 class _HourlyStatisticsTask(RecorderTask):
     """Retain the same acknowledgement when Recorder requests an import retry."""
 
+    # Own the pre-import commit so a failure cannot bypass our acknowledgement.
+    commit_before = False
+
     metadata: StatisticMetaData
     rows: list[StatisticData]
     done: asyncio.Future[None]
@@ -42,6 +45,13 @@ class _HourlyStatisticsTask(RecorderTask):
 
     def run(self, instance: Recorder) -> None:
         """Import on the writer thread and acknowledge committed values only."""
+        try:
+            CommitTask().run(instance)
+        except Exception as exc:
+            self._finish(instance, exc)
+            # Recorder must still recover its event session through its normal
+            # error handler. Completing our future must not swallow that error.
+            raise
         if monotonic() >= self.deadline:
             self._finish(instance, APIError("Hourly statistics write expired"))
             return

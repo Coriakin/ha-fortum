@@ -1463,10 +1463,20 @@ class FortumAPIClient:
                 rows,
             )
             recorder_by_statistic = await self._get_hourly_stats_values_in_window(
-                set(statistic_ids.as_tuple()),
+                {statistic_ids.consumption, statistic_ids.cost},
                 sync_start,
                 sync_end,
                 value_type="state",
+            )
+            # HA omits state when no cumulative metadata exists. Price and
+            # temperature are mean streams even before consumption/cost arrives.
+            recorder_by_statistic.update(
+                await self._get_hourly_stats_values_in_window(
+                    {statistic_ids.price, statistic_ids.temperature},
+                    sync_start,
+                    sync_end,
+                    value_type="mean",
+                )
             )
             (
                 first_differing_hour,

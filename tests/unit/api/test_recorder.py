@@ -158,3 +158,48 @@ async def test_expired_database_retry_is_not_written_again(mock_hass, mock_auth_
         with pytest.raises(APIError, match="expired"):
             await done
         write.assert_called_once()
+
+
+async def test_event_commit_cannot_extend_hourly_write_deadline(
+    mock_hass, mock_auth_client
+):
+    """An event-session commit can consume the remaining statistics deadline."""
+    from custom_components.fortum.api.recorder import _HourlyStatisticsTask
+
+    client = FortumAPIClient(mock_hass, mock_auth_client)
+    metadata = client._build_hourly_statistic_metadata(
+        statistic_id="fortum:hourly_consumption_test",
+        name="Test consumption",
+        unit_of_measurement="kWh",
+        unit_class="energy",
+        has_sum=True,
+    )
+    done = asyncio.get_running_loop().create_future()
+    task = _HourlyStatisticsTask(
+        metadata,
+        [{"start": datetime(2026, 1, 1, tzinfo=UTC), "state": 1.0, "sum": 1.0}],
+        done,
+        deadline=1.0,
+    )
+    recorder = Mock()
+    recorder.hass.loop = asyncio.get_running_loop()
+    elapsed = 0.0
+
+    def commit():
+        nonlocal elapsed
+        elapsed = 2.0
+
+    recorder._commit_event_session_or_retry.side_effect = commit
+    with (
+        patch("custom_components.fortum.api.recorder.import_statistics") as write,
+        patch(
+            "custom_components.fortum.api.recorder.monotonic",
+            side_effect=lambda: elapsed,
+        ),
+    ):
+        task.run(recorder)
+        with pytest.raises(APIError, match="expired"):
+            await done
+        recorder._commit_event_session_or_retry.assert_called_once()
+        write.assert_not_called()
+        recorder.queue_task.assert_not_called()

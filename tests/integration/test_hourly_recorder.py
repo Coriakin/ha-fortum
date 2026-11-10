@@ -427,3 +427,131 @@ async def test_permanent_database_failure_is_not_acknowledged(recorder_client):
         assert client._pending_hourly_writes == []
         assert await client._record_hourly_data_stats("test", START, end) == 1
         assert await client._record_hourly_data_stats("test", START, end) == 0
+
+
+@pytest.mark.parametrize("price", [0.0, -0.5])
+@pytest.mark.parametrize("with_temperature", [False, True])
+async def test_price_only_import_is_idempotent_without_cumulative_metadata(
+    recorder_client, price, with_temperature
+):
+    """Reproduce HA omitting state when only mean statistics exist."""
+    from homeassistant.components.recorder.statistics import get_metadata
+
+    from custom_components.fortum.models import TemperatureReading
+
+    client, recorder = recorder_client
+    ids = client._build_hourly_statistic_ids("test")
+    point = _point(0, energy=None)
+    point.price = Price(price, price, 0.0, 25.0)
+    point.temperature_reading = TemperatureReading(5.0) if with_temperature else None
+    series = _series([point])
+    end = START + timedelta(hours=1)
+    with patch.object(client, "get_time_series_data", return_value=[series]):
+        assert await client._record_hourly_data_stats("test", START, end) == 1
+        metadata = await recorder.async_add_executor_job(
+            lambda: get_metadata(recorder.hass, statistic_ids=set(ids.as_tuple()))
+        )
+        assert set(metadata) == (
+            {ids.price, ids.temperature} if with_temperature else {ids.price}
+        )
+        assert await client._record_hourly_data_stats("test", START, end) == 0
+
+        # Correct two streams in the same hour, but count the hour only once.
+        point.price = Price(price + 1.0, price + 1.0, 0.0, 25.0)
+        if with_temperature:
+            point.temperature_reading = TemperatureReading(6.0)
+        assert await client._record_hourly_data_stats("test", START, end) == 1
+        assert await client._record_hourly_data_stats("test", START, end) == 0
+
+        # A later empty response preserves mean streams without adding readings.
+        series.series = []
+        assert await client._record_hourly_data_stats("test", START, end) == 0
+        assert await client._get_hourly_stats_values_in_window(
+            {ids.price}, START, end, value_type="mean"
+        ) == {ids.price: {START: price + 1.0}}
+
+        # Consumption may arrive later, with pricing omitted again.
+        series.series = [_point(0, energy=3.0)]
+        assert await client._record_hourly_data_stats("test", START, end) == 1
+        assert await client._record_hourly_data_stats("test", START, end) == 0
+        assert (
+            await client._get_hourly_stat_sum_before_hour(ids.consumption, end) == 3.0
+        )
+        assert await client._get_hourly_stats_values_in_window(
+            {ids.price}, START, end, value_type="mean"
+        ) == {ids.price: {START: price + 1.0}}
+        if with_temperature:
+            assert await client._get_hourly_stats_values_in_window(
+                {ids.temperature}, START, end, value_type="mean"
+            ) == {ids.temperature: {START: 6.0}}
+
+
+async def test_event_commit_failure_acknowledges_write_and_allows_recovery(
+    recorder_client,
+):
+    """A failure before the statistics import must not orphan its acknowledgement."""
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from custom_components.fortum.exceptions import APIError
+
+    client, recorder = recorder_client
+    original_process = recorder._process_one_task_or_event_or_recover
+    original_commit = recorder._commit_event_session_or_retry
+    processing_hourly_task = False
+    processed = asyncio.Event()
+    failures = 0
+
+    def process(task):
+        nonlocal processing_hourly_task
+        processing_hourly_task = isinstance(task, _HourlyStatisticsTask)
+        try:
+            original_process(task)
+        finally:
+            if processing_hourly_task:
+                recorder.hass.loop.call_soon_threadsafe(processed.set)
+            processing_hourly_task = False
+
+    def fail_commit_once():
+        nonlocal failures
+        if processing_hourly_task and failures == 0:
+            failures += 1
+            raise SQLAlchemyError("test event-session commit failure")
+        original_commit()
+
+    series = _series([_point(0)])
+    end = START + timedelta(hours=1)
+    try:
+        with (
+            patch.object(client, "get_time_series_data", return_value=[series]),
+            patch.object(
+                recorder, "_process_one_task_or_event_or_recover", side_effect=process
+            ),
+            patch.object(
+                recorder, "_commit_event_session_or_retry", side_effect=fail_commit_once
+            ),
+            patch.object(
+                recorder, "_reopen_event_session", wraps=recorder._reopen_event_session
+            ) as recover,
+            patch(
+                "custom_components.fortum.api.client.HOURLY_STATISTICS_WRITE_TIMEOUT_SECONDS",
+                0.1,
+            ),
+        ):
+            with pytest.raises(APIError, match="Failed to persist"):
+                await client._record_hourly_data_stats("test", START, end)
+            assert failures == 1
+            assert client._pending_hourly_writes == []
+            assert client._last_hourly_stats_digest is None
+
+            # Recorder must still perform its normal event-session recovery.
+            async with asyncio.timeout(5):
+                await processed.wait()
+            recover.assert_called_once()
+            series.series = [_point(0, energy=2.0)]
+            assert await client._record_hourly_data_stats("test", START, end) == 1
+            assert await client._record_hourly_data_stats("test", START, end) == 0
+    finally:
+        # Clean up the orphan on the unfixed implementation, so the regression
+        # fails promptly rather than leaving an unfinished test future behind.
+        for done in client._pending_hourly_writes:
+            done.cancel()

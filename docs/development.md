@@ -55,6 +55,8 @@ custom_components/fortum/
 - Imports and reconciles consumption, cost, and price independently. Explicit `ENERGY` readings establish consumption availability, including zero. Missing metrics retain their recorded values before cumulative sums are recalculated.
 - Uses `price` coverage for sync scheduling and historical gap polling, not as an import or comparison gate.
 - Waits for Recorder's queued hourly writes to commit before subsequent windows read cumulative baselines. A window without consumption or cost rows keeps that metric's preceding recorded sum when recalculating later history.
+- `api/recorder.py` tracks each hourly write through Recorder's database retries and verifies committed values before acknowledging it. A queue marker alone is insufficient because retries can move behind it.
+- Hourly write waits time out after 60 seconds and fail the sync. Queued retries expire at their deadline; an already running database operation cannot be interrupted. Its acknowledgement remains tracked so subsequent imports cannot read baselines until it finishes. Failed writes never populate the completed-import digest. Writes are not an atomic transaction across statistic streams.
 - Fortum may still provide `temperatureReading` when core metrics are missing (`energy: []`, `cost: null`, `price: null`).
 
 ### Token and Session Handling (`api/auth.py`, `api/client.py`, `coordinators/*`)

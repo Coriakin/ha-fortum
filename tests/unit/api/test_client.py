@@ -949,7 +949,8 @@ class TestFortumAPIClient:
                 return_value=[time_series],
             ) as mock_get_series,
             patch(
-                "custom_components.fortum.api.client.async_add_external_statistics"
+                "custom_components.fortum.api.client.FortumAPIClient._queue_hourly_statistics",
+                autospec=True,
             ) as mock_add_stats,
         ):
             imported = await client.sync_hourly_data_for_metering_points(
@@ -1535,10 +1536,6 @@ class TestFortumAPIClient:
             async def async_add_executor_job(self, job):
                 return job()
 
-            def queue_task(self, task):
-                """Writes in this deterministic store are already committed."""
-                task.future.set_result(None)
-
         def _fake_statistics_during_period(
             _hass,
             start_time: datetime,
@@ -1624,7 +1621,8 @@ class TestFortumAPIClient:
                 side_effect=_fake_statistics_during_period,
             ),
             patch(
-                "custom_components.fortum.api.client.async_add_external_statistics",
+                "custom_components.fortum.api.client.FortumAPIClient._queue_hourly_statistics",
+                autospec=True,
                 side_effect=_fake_add_external_statistics,
             ),
             patch.object(
@@ -1840,10 +1838,6 @@ class TestFortumAPIClient:
             async def async_add_executor_job(self, job):
                 return job()
 
-            def queue_task(self, task):
-                """Writes in this deterministic store are already committed."""
-                task.future.set_result(None)
-
         def _fake_statistics_during_period(
             _hass,
             start_time: datetime,
@@ -1938,7 +1932,8 @@ class TestFortumAPIClient:
                 side_effect=_fake_statistics_during_period,
             ),
             patch(
-                "custom_components.fortum.api.client.async_add_external_statistics",
+                "custom_components.fortum.api.client.FortumAPIClient._queue_hourly_statistics",
+                autospec=True,
                 side_effect=_fake_add_external_statistics,
             ),
             patch.object(
@@ -2131,10 +2126,6 @@ class TestFortumAPIClient:
             async def async_add_executor_job(self, job):
                 return job()
 
-            def queue_task(self, task):
-                """Writes in this deterministic store are already committed."""
-                task.future.set_result(None)
-
         def _fake_statistics_during_period(
             _hass,
             start_time: datetime,
@@ -2230,7 +2221,8 @@ class TestFortumAPIClient:
                 side_effect=_fake_statistics_during_period,
             ),
             patch(
-                "custom_components.fortum.api.client.async_add_external_statistics",
+                "custom_components.fortum.api.client.FortumAPIClient._queue_hourly_statistics",
+                autospec=True,
                 side_effect=_fake_add_external_statistics,
             ),
             patch.object(
@@ -2326,7 +2318,10 @@ class TestFortumAPIClient:
                 "_get_hourly_stats_values_in_window",
                 return_value={},
             ),
-            patch("custom_components.fortum.api.client.async_add_external_statistics"),
+            patch(
+                "custom_components.fortum.api.client.FortumAPIClient._queue_hourly_statistics",
+                autospec=True,
+            ),
         ):
             await client._record_hourly_data_stats("6094111", from_date, to_date)
 
@@ -2412,7 +2407,8 @@ class TestFortumAPIClient:
                 side_effect=[state_values, sum_values],
             ),
             patch(
-                "custom_components.fortum.api.client.async_add_external_statistics",
+                "custom_components.fortum.api.client.FortumAPIClient._queue_hourly_statistics",
+                autospec=True,
                 side_effect=_capture_metadata,
             ),
         ):
@@ -2556,7 +2552,8 @@ class TestFortumAPIClient:
             patch.object(client, "get_time_series_data", return_value=[time_series]),
             patch.object(client, "_get_hourly_stat_sum_before_hour", return_value=0.0),
             patch(
-                "custom_components.fortum.api.client.async_add_external_statistics"
+                "custom_components.fortum.api.client.FortumAPIClient._queue_hourly_statistics",
+                autospec=True,
             ) as mock_add_stats,
         ):
             imported = await client.sync_hourly_data_for_metering_points(
@@ -2918,7 +2915,8 @@ class TestFortumAPIClient:
 
         with (
             patch(
-                "custom_components.fortum.api.client.async_add_external_statistics",
+                "custom_components.fortum.api.client.FortumAPIClient._queue_hourly_statistics",
+                autospec=True,
                 side_effect=_fake_add_external_statistics,
             ),
             patch.object(client, "get_time_series_data", return_value=[time_series]),
@@ -3087,7 +3085,8 @@ class TestFortumAPIClient:
                 return_value=now - timedelta(hours=1),
             ),
             patch(
-                "custom_components.fortum.api.client.async_add_external_statistics",
+                "custom_components.fortum.api.client.FortumAPIClient._queue_hourly_statistics",
+                autospec=True,
                 side_effect=_fake_add_external_statistics,
             ),
         ):
@@ -3290,7 +3289,8 @@ class TestFortumAPIClient:
                 side_effect=_base_sum,
             ),
             patch(
-                "custom_components.fortum.api.client.async_add_external_statistics",
+                "custom_components.fortum.api.client.FortumAPIClient._queue_hourly_statistics",
+                autospec=True,
                 side_effect=_fake_add_external_statistics,
             ),
         ):
@@ -3445,7 +3445,10 @@ class TestFortumAPIClient:
                 "_get_hourly_stats_values_in_window",
                 return_value=recorder_values,
             ),
-            patch("custom_components.fortum.api.client.async_add_external_statistics"),
+            patch(
+                "custom_components.fortum.api.client.FortumAPIClient._queue_hourly_statistics",
+                autospec=True,
+            ),
             patch(
                 "custom_components.fortum.api.client._LOGGER.warning"
             ) as mock_warning,
@@ -3546,7 +3549,10 @@ class TestFortumAPIClient:
                 "_get_hourly_stats_values_in_window",
                 return_value=recorder_values,
             ),
-            patch("custom_components.fortum.api.client.async_add_external_statistics"),
+            patch(
+                "custom_components.fortum.api.client.FortumAPIClient._queue_hourly_statistics",
+                autospec=True,
+            ),
             patch("custom_components.fortum.api.client._LOGGER.debug") as mock_debug,
         ):
             imported = await client._record_hourly_data_stats(
@@ -3631,7 +3637,8 @@ class TestFortumAPIClient:
                 return_value=recorder_values,
             ),
             patch(
-                "custom_components.fortum.api.client.async_add_external_statistics"
+                "custom_components.fortum.api.client.FortumAPIClient._queue_hourly_statistics",
+                autospec=True,
             ) as mock_add_stats,
         ):
             first_imported = await client._record_hourly_data_stats(
@@ -3714,7 +3721,10 @@ class TestFortumAPIClient:
                 "_get_hourly_stats_values_in_window",
                 return_value=recorder_values,
             ),
-            patch("custom_components.fortum.api.client.async_add_external_statistics"),
+            patch(
+                "custom_components.fortum.api.client.FortumAPIClient._queue_hourly_statistics",
+                autospec=True,
+            ),
             patch(
                 "custom_components.fortum.api.client._LOGGER.warning"
             ) as mock_warning,
@@ -3770,7 +3780,8 @@ class TestFortumAPIClient:
             patch.object(client, "get_time_series_data", return_value=[time_series]),
             patch.object(client, "_get_hourly_stat_sum_before_hour", return_value=0.0),
             patch(
-                "custom_components.fortum.api.client.async_add_external_statistics"
+                "custom_components.fortum.api.client.FortumAPIClient._queue_hourly_statistics",
+                autospec=True,
             ) as mock_add_stats,
         ):
             await client._record_hourly_data_stats(

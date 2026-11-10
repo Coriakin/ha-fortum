@@ -7,12 +7,12 @@ from unittest.mock import patch
 
 import pytest
 from homeassistant.components.recorder.core import Recorder
-from homeassistant.components.recorder.statistics import async_add_external_statistics
-from homeassistant.components.recorder.tasks import ImportStatisticsTask, RecorderTask
+from homeassistant.components.recorder.tasks import RecorderTask
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.recorder import DATA_INSTANCE, DATA_RECORDER, RecorderData
 
 from custom_components.fortum.api.client import FortumAPIClient
+from custom_components.fortum.api.recorder import _HourlyStatisticsTask
 from custom_components.fortum.models import (
     CostDataPoint,
     EnergyDataPoint,
@@ -88,7 +88,8 @@ async def test_import_waits_for_queued_recorder_writes(
     queued = asyncio.Event()
     release = ThreadEvent()
     writing = ThreadEvent()
-    original_run = ImportStatisticsTask.run
+    original_run = _HourlyStatisticsTask.run
+    original_enqueue = client._queue_hourly_statistics
 
     def hold_import(task, instance):
         writing.set()
@@ -100,8 +101,8 @@ async def test_import_waits_for_queued_recorder_writes(
             instance.hass.loop.call_soon_threadsafe(entered.set)
             assert release.wait(10), "Test did not release Recorder writer"
 
-    def enqueue(hass, metadata, rows):
-        async_add_external_statistics(hass, metadata, rows)
+    def enqueue(metadata, rows):
+        original_enqueue(metadata, rows)
         if write_in_progress:
             # Force the writer to dequeue the task before the importer waits.
             assert writing.wait(10), "Recorder did not start the import"
@@ -117,15 +118,16 @@ async def test_import_waits_for_queued_recorder_writes(
             await entered.wait()
             with (
                 patch.object(
-                    ImportStatisticsTask,
+                    _HourlyStatisticsTask,
                     "run",
                     hold_import if write_in_progress else original_run,
                 ),
                 patch.object(
                     client, "get_time_series_data", return_value=[_series([_point(0)])]
                 ),
-                patch(
-                    "custom_components.fortum.api.client.async_add_external_statistics",
+                patch.object(
+                    client,
+                    "_queue_hourly_statistics",
                     side_effect=enqueue,
                 ),
             ):
@@ -194,10 +196,26 @@ async def test_multi_window_reconciliation_with_real_recorder(recorder_client):
         assert sums[ids.cost][end - timedelta(hours=1)] == 2.0 + hours * 0.5 - 1.0
 
 
-async def test_backfill_without_cost_retains_persisted_baseline(recorder_client):
+@pytest.mark.parametrize("retry_tail", [False, True])
+async def test_backfill_without_cost_retains_persisted_baseline(
+    recorder_client, retry_tail
+):
     """An empty cost window must not reset sums in the later persisted tail."""
+    from homeassistant.components.recorder import statistics
+    from sqlalchemy.exc import OperationalError
+
     client, _recorder = recorder_client
     ids = client._build_hourly_statistic_ids("test")
+    original_import = statistics._import_statistics_with_session
+    failures = 0
+
+    def retry_cost_tail(instance, session, metadata, rows, table):
+        nonlocal failures
+        if retry_tail and failures == 0 and metadata["statistic_id"] == ids.cost:
+            failures += 1
+            raise OperationalError("test import", {}, Exception(1213, "test deadlock"))
+        return original_import(instance, session, metadata, rows, table)
+
     later_hour = START + timedelta(days=20)
     end = START + timedelta(days=28)
     series = _series([_point(-1, 4.0, 2.0)])
@@ -210,6 +228,15 @@ async def test_backfill_without_cost_retains_persisted_baseline(recorder_client)
 
         series.series = [_point(0, 1.0)]
         with (
+            patch.object(
+                statistics,
+                "_import_statistics_with_session",
+                side_effect=retry_cost_tail,
+            ),
+            patch(
+                "homeassistant.components.recorder.util._is_retryable_error",
+                return_value=True,
+            ),
             patch(
                 "custom_components.fortum.api.client.dt_util.utcnow", return_value=end
             ),
@@ -231,3 +258,172 @@ async def test_backfill_without_cost_retains_persisted_baseline(recorder_client)
         )
         assert sums[ids.consumption] == {START: 5.0, later_hour: 7.0}
         assert sums[ids.cost] == {later_hour: 3.0}
+        assert failures == int(retry_tail)
+
+
+@pytest.mark.parametrize("failures", [1, 3])
+async def test_database_retries_finish_before_the_next_window(
+    recorder_client, failures
+):
+    """Real Recorder retries retain their acknowledgement behind other tasks."""
+    from homeassistant.components.recorder import statistics
+    from sqlalchemy.exc import OperationalError
+
+    client, recorder = recorder_client
+    entered = asyncio.Event()
+    release = ThreadEvent()
+    original_import = statistics._import_statistics_with_session
+    attempts = 0
+
+    def retry_import(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts <= failures:
+            raise OperationalError("test import", {}, Exception(1213, "test deadlock"))
+        if attempts == failures + 1:
+            recorder.hass.loop.call_soon_threadsafe(entered.set)
+            assert release.wait(5)
+        return original_import(*args, **kwargs)
+
+    end = START + timedelta(days=14, hours=1)
+    series = _series([_point(0), _point(14 * 24)])
+    sync = None
+    try:
+        async with asyncio.timeout(10):
+            with (
+                patch.object(
+                    client, "get_time_series_data", return_value=[series]
+                ) as fetch,
+                patch.object(
+                    statistics,
+                    "_import_statistics_with_session",
+                    side_effect=retry_import,
+                ),
+                # Exercise HA's retry decorator and our task on SQLite; the
+                # production retry classification is MySQL-specific.
+                patch(
+                    "homeassistant.components.recorder.util._is_retryable_error",
+                    return_value=True,
+                ),
+            ):
+                sync = asyncio.create_task(client._sync_hourly_data("test", START, end))
+                await entered.wait()
+                assert not sync.done()
+                assert fetch.await_count == 1
+                assert client._last_hourly_stats_digest is None
+                release.set()
+                assert await sync == 2
+                assert fetch.await_count == 2
+            ids = client._build_hourly_statistic_ids("test")
+            assert (
+                await client._get_hourly_stat_sum_before_hour(ids.consumption, end)
+                == 2.0
+            )
+    finally:
+        release.set()
+        if sync is not None:
+            await sync
+
+
+@pytest.mark.parametrize("in_progress", [False, True])
+async def test_timeout_retains_pending_write_and_blocks_new_reads(
+    recorder_client, in_progress
+):
+    """A timed-out writer cannot race a later import or suppress it via digest."""
+    from custom_components.fortum.exceptions import APIError
+
+    client, recorder = recorder_client
+    entered = asyncio.Event()
+    release = ThreadEvent()
+    original_verify = _HourlyStatisticsTask._verify
+
+    class HoldWriter(RecorderTask):
+        def run(self, instance):
+            instance.hass.loop.call_soon_threadsafe(entered.set)
+            assert release.wait(5)
+
+    def hold_verify(task, instance):
+        # The import has committed but its acknowledgement is still in flight.
+        instance.hass.loop.call_soon_threadsafe(entered.set)
+        assert release.wait(5)
+        original_verify(task, instance)
+
+    if not in_progress:
+        recorder.queue_task(HoldWriter())
+    series = _series([_point(0)])
+    end = START + timedelta(hours=1)
+    try:
+        with (
+            patch.object(
+                client, "get_time_series_data", return_value=[series]
+            ) as fetch,
+            patch.object(
+                _HourlyStatisticsTask,
+                "_verify",
+                hold_verify if in_progress else original_verify,
+            ),
+            patch(
+                "custom_components.fortum.api.client.HOURLY_STATISTICS_WRITE_TIMEOUT_SECONDS",
+                0.05,
+            ),
+        ):
+            if not in_progress:
+                await entered.wait()
+            with pytest.raises(APIError, match="Timed out"):
+                await client._record_hourly_data_stats("test", START, end)
+            assert entered.is_set()
+            assert client._last_hourly_stats_digest is None
+            assert client._pending_hourly_writes
+            assert all(not done.cancelled() for done in client._pending_hourly_writes)
+            with pytest.raises(APIError, match="Timed out"):
+                await client._record_hourly_data_stats("test", START, end)
+            assert fetch.await_count == 1
+            release.set()
+            results = await asyncio.gather(
+                *client._pending_hourly_writes, return_exceptions=True
+            )
+            if not in_progress:
+                assert isinstance(results[0], APIError)  # Expired before writing.
+                with pytest.raises(APIError, match="Failed to persist"):
+                    await client._record_hourly_data_stats("test", START, end)
+                assert fetch.await_count == 1
+            else:
+                assert results == [None]
+
+        series.series = [_point(0, 3.0)]
+        with patch.object(client, "get_time_series_data", return_value=[series]):
+            assert await client._record_hourly_data_stats("test", START, end) == 1
+            assert await client._record_hourly_data_stats("test", START, end) == 0
+        ids = client._build_hourly_statistic_ids("test")
+        assert (
+            await client._get_hourly_stat_sum_before_hour(ids.consumption, end) == 3.0
+        )
+    finally:
+        release.set()
+        await asyncio.gather(*client._pending_hourly_writes, return_exceptions=True)
+
+
+async def test_permanent_database_failure_is_not_acknowledged(recorder_client):
+    """HA returns True after a permanent error; read-back must detect lost rows."""
+    from homeassistant.components.recorder import statistics
+    from sqlalchemy.exc import OperationalError
+
+    from custom_components.fortum.exceptions import APIError
+
+    client, _recorder = recorder_client
+    series = _series([_point(0)])
+    end = START + timedelta(hours=1)
+    with patch.object(client, "get_time_series_data", return_value=[series]):
+        with patch.object(
+            statistics,
+            "_import_statistics_with_session",
+            side_effect=OperationalError(
+                "test import", {}, Exception("permanent test error")
+            ),
+        ):
+            with pytest.raises(APIError, match="Failed to persist"):
+                await client._record_hourly_data_stats("test", START, end)
+        assert client._last_hourly_stats_digest is None
+        assert client._pending_hourly_writes == []
+        assert await client._record_hourly_data_stats("test", START, end) == 1
+        assert await client._record_hourly_data_stats("test", START, end) == 0

@@ -137,7 +137,8 @@ def hourly_store(mock_hass, mock_auth_client):
             client, "_get_recorded_price_stat_hours", side_effect=read_price_hours
         ),
         patch(
-            "custom_components.fortum.api.client.async_add_external_statistics",
+            "custom_components.fortum.api.client.FortumAPIClient._queue_hourly_statistics",
+            autospec=True,
             side_effect=write_values,
         ),
     ):

@@ -17,7 +17,6 @@ from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
     statistics_during_period,
 )
-from homeassistant.components.recorder.tasks import SynchronizeTask
 from homeassistant.helpers.httpx_client import get_async_client
 from homeassistant.helpers.recorder import get_instance
 from homeassistant.util import dt as dt_util
@@ -45,6 +44,7 @@ from ..models import (
     TimeSeriesDataPoint,
 )
 from .endpoints import APIEndpoints
+from .recorder import queue_hourly_statistics
 
 if TYPE_CHECKING:
     from homeassistant.components.recorder.models import (
@@ -58,6 +58,7 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 CLEAR_STATISTICS_TIMEOUT_SECONDS = 60
+HOURLY_STATISTICS_WRITE_TIMEOUT_SECONDS = 60
 REQUEST_RETRY_DELAYS = (5.0, 10.0)
 HOURLY_VALUE_DIFF_TOLERANCE = 1e-9
 
@@ -154,6 +155,7 @@ class FortumAPIClient:
         self._earliest_available_by_metering_point: dict[str, datetime] = {}
         self._last_price_forecast_digest_by_area: dict[str, str] = {}
         self._last_hourly_stats_digest: str | None = None
+        self._pending_hourly_writes: list[asyncio.Future[None]] = []
         self._hourly_metadata_cache: dict[str, StatisticMetaData] = {}
 
     @staticmethod
@@ -962,6 +964,7 @@ class FortumAPIClient:
         cost_seed_sum: float,
     ) -> float:
         """Recalculate sums and return last-hour consumption sum delta."""
+        await self._wait_for_hourly_statistics_writes()
         range_start = dt_util.as_utc(from_hour).replace(
             minute=0, second=0, microsecond=0
         )
@@ -1028,8 +1031,7 @@ class FortumAPIClient:
                     }
                 )
 
-            async_add_external_statistics(
-                self._hass,
+            self._queue_hourly_statistics(
                 metadata,
                 cast("list[StatisticData]", statistic_rows),
             )
@@ -1344,32 +1346,28 @@ class FortumAPIClient:
         """Write hourly rows to recorder and return written row count."""
         written_rows = 0
         if rows.consumption:
-            async_add_external_statistics(
-                self._hass,
+            self._queue_hourly_statistics(
                 metadata.consumption,
                 cast("list[StatisticData]", rows.consumption),
             )
             written_rows += len(rows.consumption)
 
         if rows.cost:
-            async_add_external_statistics(
-                self._hass,
+            self._queue_hourly_statistics(
                 metadata.cost,
                 cast("list[StatisticData]", rows.cost),
             )
             written_rows += len(rows.cost)
 
         if rows.price:
-            async_add_external_statistics(
-                self._hass,
+            self._queue_hourly_statistics(
                 metadata.price,
                 cast("list[StatisticData]", rows.price),
             )
             written_rows += len(rows.price)
 
         if rows.temperature:
-            async_add_external_statistics(
-                self._hass,
+            self._queue_hourly_statistics(
                 metadata.temperature,
                 cast("list[StatisticData]", rows.temperature),
             )
@@ -1377,13 +1375,42 @@ class FortumAPIClient:
 
         return written_rows
 
+    def _queue_hourly_statistics(
+        self,
+        metadata: StatisticMetaData,
+        rows: list[StatisticData],
+    ) -> None:
+        """Track acknowledgements for every hourly write, including retries."""
+        self._last_hourly_stats_digest = None
+        self._pending_hourly_writes.append(
+            queue_hourly_statistics(
+                self._hass,
+                metadata,
+                rows,
+                timeout=HOURLY_STATISTICS_WRITE_TIMEOUT_SECONDS,
+            )
+        )
+
     async def _wait_for_hourly_statistics_writes(self) -> None:
-        """Commit queued imports before reading their values in another window."""
-        # Always enqueue the barrier: an empty queue can still have an import
-        # in progress on Recorder's writer thread, invisible to query workers.
-        done = asyncio.get_running_loop().create_future()
-        get_instance(self._hass).queue_task(SynchronizeTask(done))
-        await done
+        """Bound the wait without losing ownership of an in-flight write."""
+        if not self._pending_hourly_writes:
+            return
+        try:
+            async with asyncio.timeout(HOURLY_STATISTICS_WRITE_TIMEOUT_SECONDS):
+                # Shield each acknowledgement: cancellation cannot stop a database
+                # transaction already running on Recorder's thread. A later sync
+                # must finish this wait before it reads any cumulative baselines.
+                results = await asyncio.gather(
+                    *(asyncio.shield(done) for done in self._pending_hourly_writes),
+                    return_exceptions=True,
+                )
+        except TimeoutError as exc:
+            raise APIError("Timed out waiting for hourly statistics writes") from exc
+        else:
+            self._pending_hourly_writes.clear()
+            for result in results:
+                if isinstance(result, BaseException):
+                    raise APIError("Failed to persist hourly statistics") from result
 
     async def _record_hourly_data_stats_detailed(
         self,
@@ -1392,6 +1419,7 @@ class FortumAPIClient:
         to_date: datetime,
     ) -> _HourlyImportResult:
         """Fetch hourly data and return window import details."""
+        await self._wait_for_hourly_statistics_writes()
         request_from_date, request_to_date, sync_start, sync_end = (
             self._build_hourly_request_and_sync_ranges(from_date, to_date)
         )

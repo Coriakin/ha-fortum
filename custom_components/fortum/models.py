@@ -80,9 +80,8 @@ class TemperatureReading:
 class TimeSeriesDataPoint:
     """Represents a time series data point.
 
-    Fortum hourly payloads typically expose core metrics together
-    (energy/cost/price all present or all missing). Temperature can still be
-    present when core metrics are missing.
+    Energy, cost, and price can arrive independently. Temperature can still
+    be present when all core metrics are missing.
     """
 
     at_utc: datetime

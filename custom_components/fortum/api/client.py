@@ -17,6 +17,7 @@ from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
     statistics_during_period,
 )
+from homeassistant.components.recorder.tasks import SynchronizeTask
 from homeassistant.helpers.httpx_client import get_async_client
 from homeassistant.helpers.recorder import get_instance
 from homeassistant.util import dt as dt_util
@@ -483,17 +484,27 @@ class FortumAPIClient:
 
                 consumption_sum_update = 0.0
                 if changed_or_added_hours_in_window > 0:
+                    consumption_seed_sum = import_result.last_consumption_sum
+                    if consumption_seed_sum is None:
+                        consumption_seed_sum = (
+                            await self._get_hourly_stat_sum_before_hour(
+                                self._build_consumption_statistic_id(metering_point_no),
+                                window_end,
+                            )
+                        )
+                    cost_seed_sum = import_result.last_cost_sum
+                    if cost_seed_sum is None:
+                        cost_seed_sum = await self._get_hourly_stat_sum_before_hour(
+                            self._build_cost_statistic_id(metering_point_no),
+                            window_end,
+                        )
                     consumption_sum_update = (
                         await self._recalculate_hourly_sums_until_end(
                             metering_point_no,
                             window_end,
                             utc_now,
-                            consumption_seed_sum=import_result.last_consumption_sum
-                            if import_result.last_consumption_sum is not None
-                            else 0.0,
-                            cost_seed_sum=import_result.last_cost_sum
-                            if import_result.last_cost_sum is not None
-                            else 0.0,
+                            consumption_seed_sum=consumption_seed_sum,
+                            cost_seed_sum=cost_seed_sum,
                         )
                     )
 
@@ -853,23 +864,25 @@ class FortumAPIClient:
         self,
         *,
         statistic_ids: tuple[str, str, str, str],
-        price_statistic_id: str,
         incoming_by_statistic: dict[str, dict[datetime, float]],
         recorder_by_statistic: dict[str, dict[datetime, float]],
     ) -> tuple[datetime | None, int, int]:
         """Return changed/added details between recorder and incoming hours.
 
-        Hour comparison is scoped to hours where price exists on both sides,
-        because price is the canonical existence marker for the hourly core
-        metrics bundle.
+        Compare only supplied values. An omitted metric is not a deletion;
+        its previously recorded value is retained during reconciliation.
         """
-        recorder_price_hours = set(
-            recorder_by_statistic.get(price_statistic_id, {}).keys()
-        )
-        incoming_price_hours = set(
-            incoming_by_statistic.get(price_statistic_id, {}).keys()
-        )
-        comparable_hours = sorted(recorder_price_hours & incoming_price_hours)
+        recorder_hours = {
+            hour
+            for statistic_id in statistic_ids
+            for hour in recorder_by_statistic.get(statistic_id, {})
+        }
+        incoming_hours = {
+            hour
+            for statistic_id in statistic_ids
+            for hour in incoming_by_statistic.get(statistic_id, {})
+        }
+        comparable_hours = sorted(recorder_hours & incoming_hours)
 
         differing_hours = 0
         first_differing_hour: datetime | None = None
@@ -878,7 +891,9 @@ class FortumAPIClient:
             for statistic_id in statistic_ids:
                 old_value = recorder_by_statistic.get(statistic_id, {}).get(hour)
                 new_value = incoming_by_statistic.get(statistic_id, {}).get(hour)
-                if self._hourly_values_differ(old_value, new_value):
+                if new_value is not None and self._hourly_values_differ(
+                    old_value, new_value
+                ):
                     hour_has_difference = True
                     break
 
@@ -887,7 +902,7 @@ class FortumAPIClient:
                 if first_differing_hour is None:
                     first_differing_hour = hour
 
-        added_hours = len(incoming_price_hours - recorder_price_hours)
+        added_hours = len(incoming_hours - recorder_hours)
 
         return first_differing_hour, differing_hours, added_hours
 
@@ -1027,6 +1042,8 @@ class FortumAPIClient:
                 )
                 consumption_sum_update = running_sum - previous_sum_at_last_updated_hour
 
+        # Subsequent backfill windows may read these recalculated baselines.
+        await self._wait_for_hourly_statistics_writes()
         return consumption_sum_update
 
     @staticmethod
@@ -1088,20 +1105,22 @@ class FortumAPIClient:
             if point_time < sync_start or point_time >= sync_end:
                 continue
 
-            # Fortum signals core hourly availability via price presence.
-            if point.price is None:
+            has_energy = any(item.type == "ENERGY" for item in point.energy)
+            # Temperature alone must not establish consumption coverage.
+            if not has_energy and not point.cost and point.price is None:
                 continue
 
-            consumption_value = float(point.total_energy)
-            rows.consumption.append(
-                {
-                    "start": point_time,
-                    "state": consumption_value,
-                    "mean": consumption_value,
-                    "min": consumption_value,
-                    "max": consumption_value,
-                }
-            )
+            if has_energy:
+                consumption_value = float(point.total_energy)
+                rows.consumption.append(
+                    {
+                        "start": point_time,
+                        "state": consumption_value,
+                        "mean": consumption_value,
+                        "min": consumption_value,
+                        "max": consumption_value,
+                    }
+                )
 
             if point.cost:
                 cost_value = float(point.total_cost)
@@ -1115,16 +1134,17 @@ class FortumAPIClient:
                     }
                 )
 
-            price_value = float(point.price.total)
-            rows.price.append(
-                {
-                    "start": point_time,
-                    "state": price_value,
-                    "mean": price_value,
-                    "min": price_value,
-                    "max": price_value,
-                }
-            )
+            if point.price is not None:
+                price_value = float(point.price.total)
+                rows.price.append(
+                    {
+                        "start": point_time,
+                        "state": price_value,
+                        "mean": price_value,
+                        "min": price_value,
+                        "max": price_value,
+                    }
+                )
 
             if point.temperature_reading is not None:
                 temperature_value = float(point.temperature_reading.temperature)
@@ -1240,14 +1260,8 @@ class FortumAPIClient:
         rows: _HourlyStatisticRows,
         recorder_by_statistic: dict[str, dict[datetime, float]],
     ) -> tuple[datetime | None, int]:
-        """Refill Fortum rows with recorder hours missing from Fortum payload."""
-        incoming_price_hours = {row["start"] for row in rows.price}
-        recorder_price_hours = set(
-            recorder_by_statistic.get(statistic_ids.price, {}).keys()
-        )
-        missing_in_fortum_hours = sorted(recorder_price_hours - incoming_price_hours)
-        if not missing_in_fortum_hours:
-            return None, 0
+        """Retain omitted readings independently for each statistic stream."""
+        missing_in_fortum_hours: set[datetime] = set()
 
         def _append_missing_state_rows(
             target_rows: list[_MutableStatisticRow],
@@ -1255,12 +1269,10 @@ class FortumAPIClient:
         ) -> None:
             existing_hours = {row["start"] for row in target_rows}
             recorder_values = recorder_by_statistic.get(statistic_id, {})
-            for hour in missing_in_fortum_hours:
-                if hour in existing_hours:
-                    continue
-                state_value = recorder_values.get(hour)
-                if state_value is None:
-                    continue
+            missing_hours = recorder_values.keys() - existing_hours
+            missing_in_fortum_hours.update(missing_hours)
+            for hour in sorted(missing_hours):
+                state_value = recorder_values[hour]
                 target_rows.append(
                     {
                         "start": hour,
@@ -1277,7 +1289,10 @@ class FortumAPIClient:
         _append_missing_state_rows(rows.temperature, statistic_ids.temperature)
         rows.sort_by_start()
 
-        return missing_in_fortum_hours[0], len(missing_in_fortum_hours)
+        return (
+            min(missing_in_fortum_hours) if missing_in_fortum_hours else None,
+            len(missing_in_fortum_hours),
+        )
 
     def _build_hourly_rows_digest(
         self,
@@ -1328,12 +1343,13 @@ class FortumAPIClient:
     ) -> int:
         """Write hourly rows to recorder and return written row count."""
         written_rows = 0
-        async_add_external_statistics(
-            self._hass,
-            metadata.consumption,
-            cast("list[StatisticData]", rows.consumption),
-        )
-        written_rows += len(rows.consumption)
+        if rows.consumption:
+            async_add_external_statistics(
+                self._hass,
+                metadata.consumption,
+                cast("list[StatisticData]", rows.consumption),
+            )
+            written_rows += len(rows.consumption)
 
         if rows.cost:
             async_add_external_statistics(
@@ -1360,6 +1376,14 @@ class FortumAPIClient:
             written_rows += len(rows.temperature)
 
         return written_rows
+
+    async def _wait_for_hourly_statistics_writes(self) -> None:
+        """Commit queued imports before reading their values in another window."""
+        # Always enqueue the barrier: an empty queue can still have an import
+        # in progress on Recorder's writer thread, invisible to query workers.
+        done = asyncio.get_running_loop().create_future()
+        get_instance(self._hass).queue_task(SynchronizeTask(done))
+        await done
 
     async def _record_hourly_data_stats_detailed(
         self,
@@ -1422,7 +1446,6 @@ class FortumAPIClient:
                 added_hours,
             ) = await self._analyze_existing_hourly_value_differences(
                 statistic_ids=statistic_ids.as_tuple(),
-                price_statistic_id=statistic_ids.price,
                 incoming_by_statistic=incoming_by_statistic,
                 recorder_by_statistic=recorder_by_statistic,
             )
@@ -1435,19 +1458,20 @@ class FortumAPIClient:
                 recorder_by_statistic=recorder_by_statistic,
             )
 
-            if not rows.consumption:
+            if not (rows.consumption or rows.cost or rows.price or rows.temperature):
                 continue
 
             await self._apply_hourly_cumulative_sums(statistic_ids, rows)
 
-            consumption_tail = rows.consumption[-1]
-            consumption_tail_sum = consumption_tail.get("sum")
-            if isinstance(consumption_tail_sum, int | float) and (
-                last_consumption_hour is None
-                or consumption_tail["start"] > last_consumption_hour
-            ):
-                last_consumption_hour = consumption_tail["start"]
-                last_consumption_sum = float(consumption_tail_sum)
+            if rows.consumption:
+                consumption_tail = rows.consumption[-1]
+                consumption_tail_sum = consumption_tail.get("sum")
+                if isinstance(consumption_tail_sum, int | float) and (
+                    last_consumption_hour is None
+                    or consumption_tail["start"] > last_consumption_hour
+                ):
+                    last_consumption_hour = consumption_tail["start"]
+                    last_consumption_sum = float(consumption_tail_sum)
 
             if rows.cost:
                 cost_tail = rows.cost[-1]
@@ -1473,8 +1497,8 @@ class FortumAPIClient:
                 )
             if missing_in_fortum_count > 0:
                 _LOGGER.info(
-                    "missing hours in Fortum data but present in statistics: "
-                    "metering_point_no=%s missing_hours=%d "
+                    "readings missing in Fortum data but present in statistics: "
+                    "metering_point_no=%s affected_hours=%d "
                     "first_missing_hour=%s",
                     time_series.metering_point_no,
                     missing_in_fortum_count,
@@ -1496,6 +1520,9 @@ class FortumAPIClient:
                 rows,
             )
 
+            # External statistics writes are queued, while queries use a separate
+            # executor. Commit this window before the next one reads its sums.
+            await self._wait_for_hourly_statistics_writes()
             self._last_hourly_stats_digest = digest
         _LOGGER.debug(
             "hourly stats import done: metering_point_no=%s "
@@ -1531,11 +1558,7 @@ class FortumAPIClient:
     def _summarize_price_gaps(
         ordered_points: list[TimeSeriesDataPoint],
     ) -> str | None:
-        """Return one-line summary of hourly core-metric gaps.
-
-        Price presence is used as the existence marker for the core hourly
-        bundle (energy/cost/price).
-        """
+        """Return one-line summary of price gaps, independent of consumption."""
         if not ordered_points:
             return None
 

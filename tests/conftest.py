@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.recorder import DATA_INSTANCE
 
 from custom_components.fortum.api import FortumAPIClient, OAuth2AuthClient
 from custom_components.fortum.models import (
@@ -20,6 +21,10 @@ def mock_hass():
     """Mock Home Assistant instance."""
     hass = MagicMock(spec=HomeAssistant)
     hass.data = {}
+    recorder = MagicMock()
+    recorder.async_add_executor_job = AsyncMock(return_value={})
+    recorder.queue_task.side_effect = lambda task: task.future.set_result(None)
+    hass.data[DATA_INSTANCE] = recorder
     hass.states = MagicMock()
     hass.config = MagicMock()
     hass.config.version = "2026.4.0"

@@ -1535,6 +1535,10 @@ class TestFortumAPIClient:
             async def async_add_executor_job(self, job):
                 return job()
 
+            def queue_task(self, task):
+                """Writes in this deterministic store are already committed."""
+                task.future.set_result(None)
+
         def _fake_statistics_during_period(
             _hass,
             start_time: datetime,
@@ -1713,13 +1717,13 @@ class TestFortumAPIClient:
             for record in caplog.records
             if record.name == "custom_components.fortum.api.client"
             and record.levelno == logging.INFO
-            and "missing hours in Fortum data but present in statistics: "
+            and "readings missing in Fortum data but present in statistics: "
             in record.getMessage()
         ]
         assert len(missing_logs) == 1
         message = missing_logs[0].getMessage()
         assert "metering_point_no=6094111" in message
-        assert "missing_hours=24" in message
+        assert "affected_hours=24" in message
         assert (
             f"first_missing_hour={ha_only_day_start.strftime('%Y-%m-%d %H:%M')}"
             in message
@@ -1835,6 +1839,10 @@ class TestFortumAPIClient:
         class _FakeRecorderInstance:
             async def async_add_executor_job(self, job):
                 return job()
+
+            def queue_task(self, task):
+                """Writes in this deterministic store are already committed."""
+                task.future.set_result(None)
 
         def _fake_statistics_during_period(
             _hass,
@@ -2122,6 +2130,10 @@ class TestFortumAPIClient:
         class _FakeRecorderInstance:
             async def async_add_executor_job(self, job):
                 return job()
+
+            def queue_task(self, task):
+                """Writes in this deterministic store are already committed."""
+                task.future.set_result(None)
 
         def _fake_statistics_during_period(
             _hass,
@@ -3448,8 +3460,9 @@ class TestFortumAPIClient:
         assert mock_warning.call_args.args[0] == (
             "recorded hour stats changed for %s: first_hour=%s changed_hours=%d"
         )
-        assert mock_warning.call_args.args[2] == "2026-03-10 00:00"
-        assert mock_warning.call_args.args[3] == 2
+        # Missing temperature at 00:00 retains its recorded value, not a change.
+        assert mock_warning.call_args.args[2] == "2026-03-10 01:00"
+        assert mock_warning.call_args.args[3] == 1
 
     async def test_record_hourly_data_stats_logs_added_and_updated_hours(
         self,

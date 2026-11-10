@@ -52,7 +52,9 @@ custom_components/fortum/
 - Requires explicit `priceArea` values from Fortum session payload for spot-price fetches (no region fallback).
 - Uses a 14-day recent window and 14-day chunks for historical catch-up.
 - Fortum API can return GraphQL errors or take over 30 seconds for larger windows (observed even around 30 days).
-- Uses `price` as the canonical hourly core-metric existence marker (`energy`/`cost`/`price` import and comparison scope).
+- Imports and reconciles consumption, cost, and price independently. Explicit `ENERGY` readings establish consumption availability, including zero. Missing metrics retain their recorded values before cumulative sums are recalculated.
+- Uses `price` coverage for sync scheduling and historical gap polling, not as an import or comparison gate.
+- Waits for Recorder's queued hourly writes to commit before subsequent windows read cumulative baselines. A window without consumption or cost rows keeps that metric's preceding recorded sum when recalculating later history.
 - Fortum may still provide `temperatureReading` when core metrics are missing (`energy: []`, `cost: null`, `price: null`).
 
 ### Token and Session Handling (`api/auth.py`, `api/client.py`, `coordinators/*`)

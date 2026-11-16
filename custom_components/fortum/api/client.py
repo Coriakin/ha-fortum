@@ -564,25 +564,33 @@ class FortumAPIClient:
         if not statistic_ids:
             return 0
 
-        done_event = asyncio.Event()
+        await self._wait_for_hourly_statistics_writes()
+        done: asyncio.Future[None] = self._hass.loop.create_future()
 
         def clear_done() -> None:
-            self._hass.loop.call_soon_threadsafe(done_event.set)
+            def complete() -> None:
+                if not done.done():
+                    done.set_result(None)
+
+            self._hass.loop.call_soon_threadsafe(complete)
 
         get_instance(self._hass).async_clear_statistics(
             statistic_ids,
             on_done=clear_done,
         )
-
-        try:
-            async with asyncio.timeout(CLEAR_STATISTICS_TIMEOUT_SECONDS):
-                await done_event.wait()
-        except TimeoutError as exc:
-            raise APIError("Timed out while clearing statistics") from exc
-
+        # Clearing is also a queued mutation of hourly statistics. Retain its
+        # acknowledgement if unload cancels the caller before Recorder finishes.
+        self._pending_hourly_writes.append(done)
         self._last_price_forecast_digest_by_area.clear()
         self._last_hourly_stats_digest = None
         self._hourly_metadata_cache.clear()
+
+        try:
+            async with asyncio.timeout(CLEAR_STATISTICS_TIMEOUT_SECONDS):
+                await asyncio.shield(done)
+        except TimeoutError as exc:
+            raise APIError("Timed out while clearing statistics") from exc
+        self._pending_hourly_writes.remove(done)
 
         return len(statistic_ids)
 
@@ -1404,6 +1412,19 @@ class FortumAPIClient:
                 timeout=HOURLY_STATISTICS_WRITE_TIMEOUT_SECONDS,
             )
         )
+
+    async def async_drain_hourly_statistics(self) -> None:
+        """Finish outstanding writes after the coordinator stops all producers.
+
+        Failed acknowledgements are safe to discard once every write has finished.
+        On timeout or cancellation, retain ownership until Recorder finishes.
+        """
+        try:
+            await self._wait_for_hourly_statistics_writes()
+        except APIError as exc:
+            if self._pending_hourly_writes:
+                raise
+            _LOGGER.info("hourly statistics write failed before unload: %s", exc)
 
     async def _wait_for_hourly_statistics_writes(self) -> None:
         """Bound the wait without losing ownership of an in-flight write."""

@@ -203,3 +203,67 @@ async def test_event_commit_cannot_extend_hourly_write_deadline(
         recorder._commit_event_session_or_retry.assert_called_once()
         write.assert_not_called()
         recorder.queue_task.assert_not_called()
+
+
+async def test_unload_drain_waits_for_all_writes_even_after_failure(
+    mock_hass, mock_auth_client
+):
+    """A failed stream cannot release a different stream still queued in Recorder."""
+    client = FortumAPIClient(mock_hass, mock_auth_client)
+    failed = asyncio.get_running_loop().create_future()
+    pending = asyncio.get_running_loop().create_future()
+    failed.set_exception(APIError("database failure"))
+    client._pending_hourly_writes = [failed, pending]
+    with patch(
+        "custom_components.fortum.api.client.HOURLY_STATISTICS_WRITE_TIMEOUT_SECONDS",
+        0.01,
+    ):
+        with pytest.raises(APIError, match="Timed out"):
+            await client.async_drain_hourly_statistics()
+    assert client._pending_hourly_writes == [failed, pending]
+    assert not pending.cancelled()
+    pending.set_result(None)
+    # Completed failures do not block unload: neither task can write again.
+    await client.async_drain_hourly_statistics()
+    assert client._pending_hourly_writes == []
+
+
+async def test_cancelled_clear_remains_owned_until_recorder_acknowledges(
+    mock_hass, mock_auth_client
+):
+    """The coordinator's clear operation must not escape the unload write drain."""
+    client = FortumAPIClient(mock_hass, mock_auth_client)
+    client._last_hourly_stats_digest = "previous-import"
+    mock_hass.loop = asyncio.get_running_loop()
+    queued = asyncio.Event()
+    callback = None
+
+    def enqueue(_ids, *, on_done):
+        nonlocal callback
+        callback = on_done
+        queued.set()
+
+    recorder = Mock()
+    recorder.async_clear_statistics.side_effect = enqueue
+    with patch(
+        "custom_components.fortum.api.client.get_instance", return_value=recorder
+    ):
+        clear = asyncio.create_task(
+            client.clear_statistics_for_discovered_points((), ())
+        )
+        await queued.wait()
+        clear.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await clear
+        assert len(client._pending_hourly_writes) == 1
+        assert client._last_hourly_stats_digest is None
+        assert not client._pending_hourly_writes[0].cancelled()
+        with patch(
+            "custom_components.fortum.api.client.HOURLY_STATISTICS_WRITE_TIMEOUT_SECONDS",
+            0.01,
+        ):
+            with pytest.raises(APIError, match="Timed out"):
+                await client.async_drain_hourly_statistics()
+        callback()
+        await client.async_drain_hourly_statistics()
+        assert client._pending_hourly_writes == []

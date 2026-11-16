@@ -86,6 +86,7 @@ For dashboard behavior and strategy options, see `docs/dashboard.md`.
 - Empty energy lists and lists containing only other energy types are missing consumption, not zero. Missing price and cost are never replaced with zero; supplied zero and negative values are retained.
 - Previously recorded readings are preserved in both modes when a later response omits a metric. Changing the option affects incoming readings; it does not clear statistics or require Energy Dashboard changes.
 - You can enable the option after restarting Home Assistant; there is no activation deadline to preserve recorded readings. The existing sync/backfill schedule revisits missing pricing and can import available consumption then, provided Fortum still supplies that history. Older gaps may take longer to catch up.
+- Changing the option reloads the integration. Active imports are stopped and queued database writes are allowed to finish before the new mode starts. If Recorder is stalled for over 60 seconds, the integration fails to unload safely; restart Home Assistant after Recorder recovers.
 - `temperatureReading` alone does not make an hour eligible for import.
 - Price coverage still drives historical catch-up and gap polling, so missing pricing is revisited even when consumption has already been imported. Accounts that never receive pricing may repeatedly fetch the same history.
 - **Statistics Last Data** reports the newest recorded consumption hour, not completeness of price or cost data.

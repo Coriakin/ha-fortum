@@ -2868,8 +2868,9 @@ class TestFortumAPIClient:
     ):
         """Clear helper should clear all generated hourly statistic ids."""
         client = FortumAPIClient(mock_hass, mock_auth_client)
-        client._hass.loop = Mock()
-        client._hass.loop.call_soon_threadsafe = lambda fn: fn()
+        import asyncio
+
+        client._hass.loop = asyncio.get_running_loop()
         recorder_instance = Mock()
 
         def _clear(statistic_ids, *, on_done=None):

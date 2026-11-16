@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta  # noqa: TC003
 from typing import TYPE_CHECKING
 
@@ -54,11 +55,40 @@ class HourlyConsumptionSyncCoordinator(DataUpdateCoordinator[list[ConsumptionDat
         self._session_manager = session_manager
         self.last_statistics_sync: datetime | None = None
         self._statistics_operation_lock = asyncio.Lock()
+        self._statistics_task: asyncio.Task | None = None
+        self._stopping = False
         self._current_month_consumption_totals: dict[str, float] = {}
         self._current_month_cost_totals: dict[str, float] = {}
         self._current_month_consumption_units: dict[str, str] = {}
         self._current_month_cost_units: dict[str, str] = {}
         self._last_data_hours: dict[str, datetime] = {}
+
+    @asynccontextmanager
+    async def _statistics_operation(self) -> AsyncIterator[None]:
+        """Own each statistics operation until completion or unload cancellation."""
+        if self._stopping:
+            raise APIError("Hourly statistics coordinator is stopping")
+        async with self._statistics_operation_lock:
+            # A queued operation may acquire the lock after unload begins.
+            if self._stopping:
+                raise APIError("Hourly statistics coordinator is stopping")
+            self._statistics_task = asyncio.current_task()
+            try:
+                yield
+            finally:
+                self._statistics_task = None
+
+    async def async_shutdown(self) -> None:
+        """Stop producers and finish Recorder writes before a replacement starts."""
+        self._stopping = True
+        await super().async_shutdown()
+        if task := self._statistics_task:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        async with self._statistics_operation_lock:
+            # Cancelling the coroutine cannot cancel a database transaction.
+            # A timeout must prevent unload from releasing this client's state.
+            await self.api_client.async_drain_hourly_statistics()
 
     def _require_snapshot(self) -> SessionSnapshot:
         """Return current session snapshot or fail coordinator update."""
@@ -71,7 +101,7 @@ class HourlyConsumptionSyncCoordinator(DataUpdateCoordinator[list[ConsumptionDat
         self,
     ) -> int:
         """Run statistics sync and update sync timestamp."""
-        async with self._statistics_operation_lock:
+        async with self._statistics_operation():
             snapshot = self._require_snapshot()
             changed_or_added_hours = (
                 await self.api_client.sync_hourly_data_for_metering_points(
@@ -88,23 +118,24 @@ class HourlyConsumptionSyncCoordinator(DataUpdateCoordinator[list[ConsumptionDat
 
     async def async_clear_statistics(self) -> int:
         """Clear all imported statistics for this integration."""
-        snapshot = self._require_snapshot()
-        cleared = await self.api_client.clear_statistics_for_discovered_points(
-            snapshot.metering_points,
-            snapshot.price_areas,
-        )
-        self._current_month_consumption_totals.clear()
-        self._current_month_cost_totals.clear()
-        self._current_month_consumption_units.clear()
-        self._current_month_cost_units.clear()
-        self._last_data_hours.clear()
-        self.last_statistics_sync = None
-        self.async_update_listeners()
-        return cleared
+        async with self._statistics_operation():
+            snapshot = self._require_snapshot()
+            cleared = await self.api_client.clear_statistics_for_discovered_points(
+                snapshot.metering_points,
+                snapshot.price_areas,
+            )
+            self._current_month_consumption_totals.clear()
+            self._current_month_cost_totals.clear()
+            self._current_month_consumption_units.clear()
+            self._current_month_cost_units.clear()
+            self._last_data_hours.clear()
+            self.last_statistics_sync = None
+            self.async_update_listeners()
+            return cleared
 
     async def async_backfill_historical_gaps(self) -> int:
         """Run manual historical recorder-gap backfill for all metering points."""
-        async with self._statistics_operation_lock:
+        async with self._statistics_operation():
             snapshot = self._require_snapshot()
             backfill = (
                 self.api_client.backfill_historical_price_gaps_for_metering_points
@@ -121,7 +152,7 @@ class HourlyConsumptionSyncCoordinator(DataUpdateCoordinator[list[ConsumptionDat
 
     async def async_resync_historical_stats(self) -> int:
         """Run manual full historical hourly re-sync for all metering points."""
-        async with self._statistics_operation_lock:
+        async with self._statistics_operation():
             snapshot = self._require_snapshot()
             changed_or_added_hours = (
                 await self.api_client.resync_historical_stats_for_metering_points(

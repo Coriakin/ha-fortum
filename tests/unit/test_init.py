@@ -83,7 +83,7 @@ class TestInit:
         ):
             scheduled_tasks: list[asyncio.Task] = []
 
-            def _create_task(coro):
+            def _create_task(_hass, coro, _name):
                 task = asyncio.create_task(coro)
                 scheduled_tasks.append(task)
                 return task
@@ -105,9 +105,7 @@ class TestInit:
 
             mock_coordinator_instance = AsyncMock()
             mock_coordinator_instance.hass = Mock()
-            mock_coordinator_instance.hass.async_create_task = Mock(
-                side_effect=_create_task
-            )
+            entry.async_create_background_task = Mock(side_effect=_create_task)
             mock_coordinator.return_value = mock_coordinator_instance
 
             mock_price_coordinator_instance = AsyncMock()
@@ -173,7 +171,7 @@ class TestInit:
         ):
             scheduled_tasks: list[asyncio.Task] = []
 
-            def _create_task(coro):
+            def _create_task(_hass, coro, _name):
                 task = asyncio.create_task(coro)
                 scheduled_tasks.append(task)
                 return task
@@ -193,9 +191,7 @@ class TestInit:
             mock_device.return_value = AsyncMock()
             mock_coordinator_instance = AsyncMock()
             mock_coordinator_instance.hass = Mock()
-            mock_coordinator_instance.hass.async_create_task = Mock(
-                side_effect=_create_task
-            )
+            entry.async_create_background_task = Mock(side_effect=_create_task)
             mock_coordinator.return_value = mock_coordinator_instance
             mock_price_coordinator.return_value = AsyncMock()
             mock_hass.config_entries.async_forward_entry_setups = AsyncMock(
@@ -304,7 +300,7 @@ class TestInit:
         entry = AsyncMock(spec=ConfigEntry)
         entry.entry_id = "test_entry_id"
 
-        mock_hass.data = {DOMAIN: {entry.entry_id: {"test": "data"}}}
+        mock_hass.data = {DOMAIN: {entry.entry_id: {"coordinator": AsyncMock()}}}
         mock_hass.config_entries.async_unload_platforms = AsyncMock(return_value=True)
 
         result = await async_unload_entry(mock_hass, entry)
@@ -317,7 +313,7 @@ class TestInit:
         entry = AsyncMock(spec=ConfigEntry)
         entry.entry_id = "test_entry_id"
 
-        mock_hass.data = {DOMAIN: {entry.entry_id: {"test": "data"}}}
+        mock_hass.data = {DOMAIN: {entry.entry_id: {"coordinator": AsyncMock()}}}
         mock_hass.config_entries.async_unload_platforms = AsyncMock(return_value=False)
 
         result = await async_unload_entry(mock_hass, entry)
@@ -597,40 +593,25 @@ class TestInit:
         )
         mock_register_panel.assert_called_once()
 
-    async def test_post_setup_refreshes_schedule_startup_gap_backfill(self):
-        """Post-setup refresh should schedule startup gap backfill task."""
+    async def test_post_setup_refreshes_await_startup_gap_backfill(self):
+        """Backfill must remain in the entry-owned startup task."""
         entry = Mock(spec=ConfigEntry)
-        entry.entry_id = "entry_1"
-
+        entry.entry_id = "test_entry"
         coordinator = Mock()
         coordinator.async_refresh = AsyncMock()
-        coordinator.hass = Mock()
-        scheduled_tasks: list[asyncio.Task] = []
-
-        def _create_task(coro):
-            task = asyncio.create_task(coro)
-            scheduled_tasks.append(task)
-            return task
-
-        coordinator.hass.async_create_task = Mock(side_effect=_create_task)
-
         price_coordinator = Mock()
         price_coordinator.async_refresh = AsyncMock()
 
-        async def _dummy_backfill(*_args, **_kwargs) -> None:
-            return None
-
         with patch(
             "custom_components.fortum._async_startup_gap_backfill",
-            side_effect=_dummy_backfill,
-        ):
+            new=AsyncMock(),
+        ) as backfill:
             await _async_post_setup_refreshes(entry, coordinator, price_coordinator)
 
         coordinator.async_refresh.assert_awaited_once_with()
         price_coordinator.async_refresh.assert_awaited_once_with()
-        coordinator.hass.async_create_task.assert_called_once()
-        if scheduled_tasks:
-            await asyncio.gather(*scheduled_tasks)
+        backfill.assert_awaited_once_with(entry, coordinator)
+        coordinator.hass.async_create_task.assert_not_called()
 
     async def test_startup_gap_backfill_calls_coordinator(self):
         """Startup gap backfill helper should delegate to coordinator."""

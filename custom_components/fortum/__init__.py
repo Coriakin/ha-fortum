@@ -69,6 +69,7 @@ from .dashboard_strategy import (
 )
 from .device import FortumDevice
 from .exceptions import (
+    APIError,
     AuthenticationError,
     FortumError,
     InvalidResponseError,
@@ -279,7 +280,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
-        entry_data = hass.data[DOMAIN].pop(entry.entry_id)
+        entry_data = hass.data[DOMAIN][entry.entry_id]
+        coordinator: HourlyConsumptionSyncCoordinator = entry_data["coordinator"]
+        try:
+            await coordinator.async_shutdown()
+        except APIError as exc:
+            _LOGGER.warning(
+                "cannot unload Fortum while Recorder writes are pending; "
+                "restart Home Assistant after Recorder recovers: %s",
+                exc,
+            )
+            return False
+        hass.data[DOMAIN].pop(entry.entry_id)
         api_client = (
             entry_data.get("api_client") if isinstance(entry_data, dict) else None
         )
@@ -388,9 +400,10 @@ async def _async_post_setup_refreshes(
             entry.entry_id,
         )
 
-        coordinator.hass.async_create_task(
-            _async_startup_gap_backfill(entry, coordinator)
-        )
+        # Keep backfill in the same entry-owned task as the initial refreshes.
+        await _async_startup_gap_backfill(entry, coordinator)
+    except APIError as exc:
+        _LOGGER.info("post-setup refresh stopped: %s", exc)
     except Exception:
         _LOGGER.exception(
             "post-setup refresh failed entry_id=%s",
@@ -415,6 +428,8 @@ async def _async_startup_gap_backfill(
             entry.entry_id,
             changed_or_added_hours,
         )
+    except APIError as exc:
+        _LOGGER.info("post-startup historical gap backfill stopped: %s", exc)
     except Exception:
         _LOGGER.exception(
             "post-startup historical gap backfill failed entry_id=%s",
@@ -431,8 +446,10 @@ def _schedule_post_setup_refreshes(
     """Schedule post-setup refreshes after HA startup completes."""
 
     if hass.is_running:
-        hass.async_create_task(
-            _async_post_setup_refreshes(entry, coordinator, price_coordinator)
+        entry.async_create_background_task(
+            hass,
+            _async_post_setup_refreshes(entry, coordinator, price_coordinator),
+            "Fortum startup statistics",
         )
         _LOGGER.debug(
             "scheduled post-setup refresh now for entry_id=%s",
@@ -448,8 +465,10 @@ def _schedule_post_setup_refreshes(
         # Listener is one-shot; mark it consumed so unload does not try to
         # remove an already-fired listener.
         unsub = None
-        hass.async_create_task(
-            _async_post_setup_refreshes(entry, coordinator, price_coordinator)
+        entry.async_create_background_task(
+            hass,
+            _async_post_setup_refreshes(entry, coordinator, price_coordinator),
+            "Fortum startup statistics",
         )
         _LOGGER.debug(
             "scheduled post-setup refresh after HA start for entry_id=%s",

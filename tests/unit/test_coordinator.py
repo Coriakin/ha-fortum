@@ -617,3 +617,52 @@ class TestSpotPriceSyncCoordinator:
 
         with pytest.raises(UpdateFailed, match="Session snapshot unavailable"):
             await price_coordinator._async_update_data()
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "async_run_statistics_sync",
+        "async_backfill_historical_gaps",
+        "async_resync_historical_stats",
+        "async_clear_statistics",
+    ],
+)
+async def test_shutdown_rejects_waiting_and_new_statistics_operations(
+    coordinator, mock_api_client, operation
+):
+    """Shutdown must fence every statistics producer, including lock waiters."""
+    import asyncio
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    queued = asyncio.Event()
+
+    async def hold_sync(_points):
+        entered.set()
+        await release.wait()
+        return 0
+
+    async def waiting_operation():
+        queued.set()
+        return await getattr(coordinator, operation)()
+
+    with patch.object(
+        mock_api_client, "sync_hourly_data_for_metering_points", hold_sync
+    ):
+        active = asyncio.create_task(coordinator.async_run_statistics_sync())
+        await entered.wait()
+        waiting = asyncio.create_task(waiting_operation())
+        await queued.wait()
+        await coordinator.async_shutdown()
+        assert active.cancelled()
+        with pytest.raises(APIError, match="stopping"):
+            await waiting
+        with pytest.raises(APIError, match="stopping"):
+            await getattr(coordinator, operation)()
+    assert coordinator.last_statistics_sync is None
+    assert not coordinator._statistics_operation_lock.locked()
+    mock_api_client.async_drain_hourly_statistics.assert_awaited_once()
+    mock_api_client.backfill_historical_price_gaps_for_metering_points.assert_not_awaited()
+    mock_api_client.resync_historical_stats_for_metering_points.assert_not_awaited()
+    mock_api_client.clear_statistics_for_discovered_points.assert_not_awaited()

@@ -52,8 +52,10 @@ custom_components/fortum/
 - Requires explicit `priceArea` values from Fortum session payload for spot-price fetches (no region fallback).
 - Uses a 14-day recent window and 14-day chunks for historical catch-up.
 - Fortum API can return GraphQL errors or take over 30 seconds for larger windows (observed even around 30 days).
-- Imports and reconciles consumption, cost, and price independently. Explicit `ENERGY` readings establish consumption availability, including zero. Missing metrics retain their recorded values before cumulative sums are recalculated.
-- Uses `price` coverage for sync scheduling and historical gap polling, not as an import or comparison gate.
+- `import_partial_hourly_data` defaults to false for new and existing config entries. The default admission policy requires all three core metrics and warns about partial hours; opting in accepts any supplied core metric without warning solely about missing pricing. Setup passes the option to the API client, and the existing options update listener reloads the entry.
+- Both modes use the same per-metric reconciliation and Recorder writer. The admission policy affects incoming API rows only; it never filters previously recorded values. Switching modes therefore preserves recorded values and cumulative contributions.
+- With partial imports enabled, imports consumption, cost, and price independently. Explicit `ENERGY` readings establish consumption availability, including zero. Missing metrics retain their recorded values before cumulative sums are recalculated.
+- Uses `price` coverage for sync scheduling and historical gap polling, not as a comparison gate. The default admission policy still requires price alongside consumption and cost.
 - Waits for Recorder's queued hourly writes to commit before subsequent windows read cumulative baselines. A window without consumption or cost rows keeps that metric's preceding recorded sum when recalculating later history.
 - `api/recorder.py` tracks each hourly write through Recorder's database retries and verifies committed values before acknowledging it. A queue marker alone is insufficient because retries can move behind it.
 - The write task acknowledges event-session commit failures before allowing Recorder's normal recovery handler to run, so those commit failures cannot leave orphaned acknowledgements. The write deadline is checked after that commit.

@@ -49,10 +49,12 @@ from .const import (
     CONF_CREATE_DASHBOARD,
     CONF_DEBUG_LOGGING,
     CONF_FORCE_SHORT_TOKEN_LIFETIME,
+    CONF_IMPORT_PARTIAL_HOURLY_DATA,
     CONF_REGION,
     DEFAULT_CREATE_DASHBOARD,
     DEFAULT_DEBUG_LOGGING,
     DEFAULT_FORCE_SHORT_TOKEN_LIFETIME,
+    DEFAULT_IMPORT_PARTIAL_HOURLY_DATA,
     DEFAULT_REGION,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
@@ -158,7 +160,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
 
         # Create API client
-        api_client = FortumAPIClient(hass, auth_client)
+        api_client = FortumAPIClient(
+            hass,
+            auth_client,
+            import_partial_hourly_data=entry.options.get(
+                CONF_IMPORT_PARTIAL_HOURLY_DATA,
+                DEFAULT_IMPORT_PARTIAL_HOURLY_DATA,
+            ),
+        )
 
         session_manager = SessionManager(hass, entry.entry_id, api_client)
         callback_result = cast(Any, auth_client).set_session_update_callback(

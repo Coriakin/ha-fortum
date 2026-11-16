@@ -19,7 +19,11 @@
           "create_current_month_sensors": "Luo kuluvan kuukauden kulutus- ja kustannusanturit",
           "debug_entities": "Nayta debug-entiteetit",
           "debug_logging": "Ota yksityiskohtainen debug-loki kayttoon",
-          "force_short_token_lifetime": "Pakota lyhyt tokenin voimassaoloaika (15 minuuttia)"
+          "force_short_token_lifetime": "Pakota lyhyt tokenin voimassaoloaika (15 minuuttia)",
+          "import_partial_hourly_data": "Tuo saatavilla olevat tuntitiedot"
+        },
+        "data_description": {
+          "import_partial_hourly_data": "Tuo kulutus, vaikka hintatiedot viivästyisivät. Kulutus ja kustannukset voivat kattaa eri tunnit. Puuttuvia tietoja ei käsitellä nollina. Aiemmin tuodut tiedot säilyvät, kun poistat tämän käytöstä."
         }
       }
     }
@@ -36,7 +40,11 @@
           "create_current_month_sensors": "Luo kuluvan kuukauden kulutus- ja kustannusanturit",
           "debug_entities": "Nayta debug-entiteetit",
           "debug_logging": "Ota yksityiskohtainen debug-loki kayttoon",
-          "force_short_token_lifetime": "Pakota lyhyt tokenin voimassaoloaika (15 minuuttia)"
+          "force_short_token_lifetime": "Pakota lyhyt tokenin voimassaoloaika (15 minuuttia)",
+          "import_partial_hourly_data": "Tuo saatavilla olevat tuntitiedot"
+        },
+        "data_description": {
+          "import_partial_hourly_data": "Tuo kulutus, vaikka hintatiedot viivästyisivät. Kulutus ja kustannukset voivat kattaa eri tunnit. Puuttuvia tietoja ei käsitellä nollina. Aiemmin tuodut tiedot säilyvät, kun poistat tämän käytöstä."
         }
       }
     }

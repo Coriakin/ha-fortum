@@ -23,6 +23,7 @@ from homeassistant.util import dt as dt_util
 
 from ..const import (
     API_DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    DEFAULT_IMPORT_PARTIAL_HOURLY_DATA,
     DOMAIN,
     HOURLY_DATA_HISTORICAL_CHUNK_DAYS,
     HOURLY_DATA_RECENT_WINDOW_DAYS,
@@ -37,6 +38,7 @@ from ..exceptions import (
     UnexpectedStatusCodeError,
 )
 from ..models import (
+    CoreMetricsState,
     CustomerDetails,
     MeteringPoint,
     SpotPricePoint,
@@ -147,10 +149,17 @@ def _fmt_utc_minute(value: datetime) -> str:
 class FortumAPIClient:
     """Main API client for Fortum tRPC services."""
 
-    def __init__(self, hass: HomeAssistant, auth_client: OAuth2AuthClient) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        auth_client: OAuth2AuthClient,
+        *,
+        import_partial_hourly_data: bool = DEFAULT_IMPORT_PARTIAL_HOURLY_DATA,
+    ) -> None:
         """Initialize API client."""
         self._hass = hass
         self._auth_client = auth_client
+        self._import_partial_hourly_data = import_partial_hourly_data
         self._endpoints = APIEndpoints.for_region(getattr(auth_client, "region", "se"))
         self._earliest_available_by_metering_point: dict[str, datetime] = {}
         self._last_price_forecast_digest_by_area: dict[str, str] = {}
@@ -1094,6 +1103,13 @@ class FortumAPIClient:
             temperature=self._build_temperature_statistic_id(metering_point_no),
         )
 
+    def _accepts_hourly_point(self, point: TimeSeriesDataPoint) -> bool:
+        """Apply the configured admission policy before shared reconciliation."""
+        state = point.core_metrics_state
+        if self._import_partial_hourly_data:
+            return state is not CoreMetricsState.MISSING
+        return state is CoreMetricsState.PRESENT
+
     def _build_hourly_rows_from_points(
         self,
         ordered_points: list[TimeSeriesDataPoint],
@@ -1107,12 +1123,10 @@ class FortumAPIClient:
             if point_time < sync_start or point_time >= sync_end:
                 continue
 
-            has_energy = any(item.type == "ENERGY" for item in point.energy)
-            # Temperature alone must not establish consumption coverage.
-            if not has_energy and not point.cost and point.price is None:
+            if not self._accepts_hourly_point(point):
                 continue
 
-            if has_energy:
+            if point.has_consumption:
                 consumption_value = float(point.total_energy)
                 rows.consumption.append(
                     {
@@ -1445,7 +1459,7 @@ class FortumAPIClient:
                 time_series.metering_point_no
             )
             ordered_points = sorted(time_series.series, key=lambda item: item.at_utc)
-            gap_summary = self._summarize_price_gaps(ordered_points)
+            gap_summary = self._summarize_core_metric_gaps(ordered_points)
             if gap_summary is not None:
                 _LOGGER.warning(
                     "gap in stats for %s: %s",
@@ -1592,56 +1606,76 @@ class FortumAPIClient:
         )
         return result.changed_or_added_hours
 
-    @staticmethod
-    def _summarize_price_gaps(
+    def _summarize_core_metric_gaps(
+        self,
         ordered_points: list[TimeSeriesDataPoint],
     ) -> str | None:
-        """Return one-line summary of price gaps, independent of consumption."""
+        """Return one-line summary of hourly core-metric gaps.
+
+        A trailing missing-only run is expected Fortum delay and not reported.
+        Incomplete hours are reported only when the import policy rejects
+        them. Accepted partial hours are not gaps.
+        """
         if not ordered_points:
             return None
 
-        intervals: list[tuple[datetime, int, bool]] = []
-        run_start = dt_util.as_utc(ordered_points[0].at_utc).replace(
-            minute=0,
-            second=0,
-            microsecond=0,
-        )
-        run_missing = ordered_points[0].price is None
-        run_hours = 1
-        previous_time = run_start
+        def _run_label(point: TimeSeriesDataPoint) -> str:
+            if self._accepts_hourly_point(point):
+                return CoreMetricsState.PRESENT.value
+            state = point.core_metrics_state
+            if state is not CoreMetricsState.INCONSISTENT:
+                return state.value
+            present = ", ".join(point.present_core_metrics)
+            return f"{state.value} (only {present})"
 
-        for point in ordered_points[1:]:
-            point_time = dt_util.as_utc(point.at_utc).replace(
+        def _point_hour(point: TimeSeriesDataPoint) -> datetime:
+            return dt_util.as_utc(point.at_utc).replace(
                 minute=0,
                 second=0,
                 microsecond=0,
             )
-            point_missing = point.price is None
+
+        intervals: list[tuple[datetime, int, str]] = []
+        run_start = _point_hour(ordered_points[0])
+        run_label = _run_label(ordered_points[0])
+        run_hours = 1
+        previous_time = run_start
+
+        for point in ordered_points[1:]:
+            point_time = _point_hour(point)
+            point_label = _run_label(point)
             contiguous = point_time == previous_time + timedelta(hours=1)
-            if contiguous and point_missing == run_missing:
+            if contiguous and point_label == run_label:
                 run_hours += 1
             else:
-                intervals.append((run_start, run_hours, run_missing))
+                intervals.append((run_start, run_hours, run_label))
                 run_start = point_time
-                run_missing = point_missing
+                run_label = point_label
                 run_hours = 1
             previous_time = point_time
 
-        intervals.append((run_start, run_hours, run_missing))
+        intervals.append((run_start, run_hours, run_label))
 
-        first_missing_index = next(
-            (idx for idx, (_, _, is_missing) in enumerate(intervals) if is_missing),
+        first_gap_index = next(
+            (
+                idx
+                for idx, (_, _, label) in enumerate(intervals)
+                if label != CoreMetricsState.PRESENT
+            ),
             None,
         )
-        if first_missing_index is None or first_missing_index == len(intervals) - 1:
+        if first_gap_index is None:
+            return None
+        if (
+            first_gap_index == len(intervals) - 1
+            and intervals[-1][2] == CoreMetricsState.MISSING
+        ):
             return None
 
-        summary_parts = []
-        for start, hours, is_missing in intervals[first_missing_index:]:
-            state = "missing" if is_missing else "present"
-            summary_parts.append(f"{_fmt_utc_minute(start)} {hours}h {state}")
-
-        return ", ".join(summary_parts)
+        return ", ".join(
+            f"{_fmt_utc_minute(start)} {hours}h {label}"
+            for start, hours, label in intervals[first_gap_index:]
+        )
 
     def _record_earliest_available_marker(
         self,

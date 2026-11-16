@@ -51,7 +51,10 @@ async def recorder_client(tmp_path, mock_auth_client):
             assert await recorder.async_db_ready
             await hass.async_start()
             await recorder.async_block_till_done()
-        yield FortumAPIClient(hass, mock_auth_client), recorder
+        yield (
+            FortumAPIClient(hass, mock_auth_client, import_partial_hourly_data=True),
+            recorder,
+        )
     finally:
         await hass.async_stop()
 
@@ -555,3 +558,81 @@ async def test_event_commit_failure_acknowledges_write_and_allows_recovery(
         # fails promptly rather than leaving an unfinished test future behind.
         for done in client._pending_hourly_writes:
             done.cancel()
+
+
+async def test_restart_then_enable_partial_imports_preserves_recorded_history(
+    recorder_client, mock_auth_client
+):
+    """Reloading in default mode cannot discard previously imported partial hours."""
+    original_client, recorder = recorder_client
+    ids = original_client._build_hourly_statistic_ids("test")
+    end = START + timedelta(hours=5)
+    series = _series(
+        [
+            _point(-1, energy=100.0, cost=50.0),
+            _point(0, energy=1.0),
+            _point(1, energy=0.0),
+            _point(2, energy=2.0),
+        ]
+    )
+    with patch.object(original_client, "get_time_series_data", return_value=[series]):
+        assert (
+            await original_client._record_hourly_data_stats(
+                "test", START - timedelta(hours=1), end
+            )
+            == 4
+        )
+
+    async def values(client, statistic_id, value_type):
+        return (
+            await client._get_hourly_stats_values_in_window(
+                {statistic_id}, START, end, value_type=value_type
+            )
+        ).get(statistic_id, {})
+
+    # A fresh client has no in-memory digest, like setup after a restart.
+    # The absent option selects upstream's default, even with unpriced history.
+    strict_client = FortumAPIClient(recorder.hass, mock_auth_client)
+    original_sums = await values(strict_client, ids.consumption, "sum")
+    assert list(original_sums.values()) == [101.0, 101.0, 103.0]
+    series.series = [
+        _point(0, energy=99.0),  # Incomplete correction is rejected in strict mode.
+        _point(3, energy=4.0, cost=2.0),
+        _point(4, energy=5.0),  # Newly available partial hour must wait.
+    ]
+    with patch.object(strict_client, "get_time_series_data", return_value=[series]):
+        assert await strict_client._record_hourly_data_stats("test", START, end) == 1
+        assert await strict_client._record_hourly_data_stats("test", START, end) == 0
+    strict_sums = await values(strict_client, ids.consumption, "sum")
+    assert strict_sums == {**original_sums, START + timedelta(hours=3): 107.0}
+    assert await values(strict_client, ids.cost, "sum") == {
+        START + timedelta(hours=3): 52.0
+    }
+
+    # Enabling later reloads the client; persisted history supplies all baselines.
+    partial_client = FortumAPIClient(
+        recorder.hass, mock_auth_client, import_partial_hourly_data=True
+    )
+    series.series = [_point(4, energy=5.0)]
+    with patch.object(partial_client, "get_time_series_data", return_value=[series]):
+        assert await partial_client._record_hourly_data_stats("test", START, end) == 1
+        assert await partial_client._record_hourly_data_stats("test", START, end) == 0
+    expected_sums = {**strict_sums, START + timedelta(hours=4): 112.0}
+    assert await values(partial_client, ids.consumption, "sum") == expected_sums
+
+    # Turning the option off again still permits later complete pricing bundles.
+    strict_client = FortumAPIClient(recorder.hass, mock_auth_client)
+    series.series = [
+        _point(0, energy=1.0, cost=0.25),
+        _point(1, energy=0.0, cost=0.0),
+        _point(2, energy=2.0, cost=-0.5),
+        _point(3, energy=4.0, cost=2.0),
+        _point(4, energy=5.0, cost=1.0),
+    ]
+    with patch.object(strict_client, "get_time_series_data", return_value=[series]):
+        assert await strict_client._record_hourly_data_stats("test", START, end) == 4
+        assert await strict_client._record_hourly_data_stats("test", START, end) == 0
+    assert await values(strict_client, ids.consumption, "sum") == expected_sums
+    assert (await values(strict_client, ids.cost, "sum"))[
+        START + timedelta(hours=4)
+    ] == 52.75

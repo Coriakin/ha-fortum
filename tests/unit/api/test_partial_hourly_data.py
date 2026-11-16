@@ -31,7 +31,9 @@ def _point(hour=0, energy=1.0, *, priced=False, cost=None):
 
 @pytest.mark.parametrize("energy", [0.0, 1.25])
 def test_energy_without_price_is_not_missing(mock_hass, mock_auth_client, energy):
-    client = FortumAPIClient(mock_hass, mock_auth_client)
+    client = FortumAPIClient(
+        mock_hass, mock_auth_client, import_partial_hourly_data=True
+    )
     rows = client._build_hourly_rows_from_points(
         [_point(energy=energy)], START, START + timedelta(hours=1)
     )
@@ -42,7 +44,9 @@ def test_energy_without_price_is_not_missing(mock_hass, mock_auth_client, energy
 
 @pytest.mark.parametrize("priced", [False, True])
 def test_missing_energy_is_not_zero(mock_hass, mock_auth_client, priced):
-    client = FortumAPIClient(mock_hass, mock_auth_client)
+    client = FortumAPIClient(
+        mock_hass, mock_auth_client, import_partial_hourly_data=True
+    )
     rows = client._build_hourly_rows_from_points(
         [_point(energy=None, priced=priced)], START, START + timedelta(hours=1)
     )
@@ -53,7 +57,9 @@ def test_missing_energy_is_not_zero(mock_hass, mock_auth_client, priced):
 
 @pytest.mark.parametrize("priced", [False, True])
 def test_non_consumption_energy_type_is_not_zero(mock_hass, mock_auth_client, priced):
-    client = FortumAPIClient(mock_hass, mock_auth_client)
+    client = FortumAPIClient(
+        mock_hass, mock_auth_client, import_partial_hourly_data=True
+    )
     point = _point(priced=priced)
     point.energy = [EnergyDataPoint(2.0, "PRODUCTION")]
     rows = client._build_hourly_rows_from_points(
@@ -92,7 +98,9 @@ async def test_pricing_only_readings(hourly_store, price, cost):
 @pytest.fixture
 def hourly_store(mock_hass, mock_auth_client):
     """Exercise importer reads/writes against a deterministic in-memory Recorder."""
-    client = FortumAPIClient(mock_hass, mock_auth_client)
+    client = FortumAPIClient(
+        mock_hass, mock_auth_client, import_partial_hourly_data=True
+    )
     ids = client._build_hourly_statistic_ids("test")
     store = {
         ids.consumption: {START - timedelta(hours=1): {"state": 4.0, "sum": 100.0}},
@@ -207,7 +215,10 @@ async def test_price_and_cost_without_energy_do_not_create_consumption(hourly_st
     assert store[ids.cost][START]["sum"] == 50.0
 
 
-async def test_multi_window_sync_revisits_delayed_prices(hourly_store):
+@pytest.mark.parametrize("enable_after_initial_sync", [False, True])
+async def test_multi_window_sync_revisits_delayed_prices(
+    hourly_store, enable_after_initial_sync
+):
     client, ids, store, series = hourly_store
     now = START + timedelta(days=35)
     hours = 35 * 24
@@ -216,6 +227,11 @@ async def test_multi_window_sync_revisits_delayed_prices(hourly_store):
     points = (MeteringPoint(metering_point_no="test"),)
 
     with patch("custom_components.fortum.api.client.dt_util.utcnow", return_value=now):
+        if enable_after_initial_sync:
+            with patch.object(client, "_import_partial_hourly_data", False):
+                assert await client.sync_hourly_data_for_metering_points(points) == 0
+            assert len(store[ids.consumption]) == 1
+            assert len(store[ids.cost]) == 1
         assert await client.sync_hourly_data_for_metering_points(points) == hours
         assert store[ids.consumption][now - timedelta(hours=1)]["sum"] == 100 + hours
         assert await client.sync_hourly_data_for_metering_points(points) == 0
@@ -289,4 +305,74 @@ async def test_backfill_preserves_empty_stream_baseline_in_later_rows(
     )
     assert store[ids.cost][later_hour]["sum"] == (
         52.0 if missing_metric == "cost" else 51.5
+    )
+
+
+@pytest.mark.parametrize("partial_imports", [False, True])
+@pytest.mark.parametrize(
+    ("energy", "cost", "price", "energy_type"),
+    [
+        (1.25, None, None, "ENERGY"),
+        (0.0, None, None, "ENERGY"),
+        (1.25, None, 0.0, "ENERGY"),
+        (1.25, -0.5, None, "ENERGY"),
+        (0.0, 0.0, 0.0, "ENERGY"),
+        (1.25, -0.5, -0.5, "ENERGY"),
+        (None, 0.0, -0.5, "ENERGY"),
+        (None, -0.5, None, "ENERGY"),
+        (None, None, 0.0, "ENERGY"),
+        (None, None, None, "ENERGY"),
+        (2.0, -0.5, 0.0, "PRODUCTION"),
+        (2.0, None, None, "PRODUCTION"),
+    ],
+)
+def test_hourly_admission_policy(
+    mock_hass, mock_auth_client, partial_imports, energy, cost, price, energy_type
+):
+    """Both policies distinguish missing values from explicit zero readings."""
+    client = FortumAPIClient(
+        mock_hass, mock_auth_client, import_partial_hourly_data=partial_imports
+    )
+    point = _point(energy=energy, cost=cost)
+    if point.energy:
+        point.energy[0].type = energy_type
+    point.price = None if price is None else Price(price, price, 0.0, 25.0)
+    rows = client._build_hourly_rows_from_points(
+        [point], START, START + timedelta(hours=1)
+    )
+    has_consumption = energy is not None and energy_type == "ENERGY"
+    complete = has_consumption and cost is not None and price is not None
+    accepted = (
+        (has_consumption or cost is not None or price is not None)
+        if partial_imports
+        else complete
+    )
+    assert [r["state"] for r in rows.consumption] == (
+        [energy] if accepted and has_consumption else []
+    )
+    assert [r["state"] for r in rows.cost] == (
+        [cost] if accepted and cost is not None else []
+    )
+    assert [r["state"] for r in rows.price] == (
+        [price] if accepted and price is not None else []
+    )
+    assert len(rows.temperature) == int(accepted)
+
+
+async def test_accepted_partial_hours_do_not_warn_about_gaps(hourly_store, caplog):
+    client, _, _, series = hourly_store
+    series.series = [_point(0, 1.0), _point(1, None, cost=-0.5)]
+    await client._record_hourly_data_stats("test", START, START + timedelta(hours=2))
+    assert not [record for record in caplog.records if record.levelname == "WARNING"]
+
+
+def test_partial_policy_still_reports_internal_empty_hours(mock_hass, mock_auth_client):
+    client = FortumAPIClient(
+        mock_hass, mock_auth_client, import_partial_hourly_data=True
+    )
+    assert client._summarize_core_metric_gaps(
+        [_point(0), _point(1, None), _point(2), _point(3, None)]
+    ) == (
+        "2026-11-01 01:00 1h missing, 2026-11-01 02:00 1h present, "
+        "2026-11-01 03:00 1h missing"
     )

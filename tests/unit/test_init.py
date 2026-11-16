@@ -24,6 +24,7 @@ from custom_components.fortum import (
 from custom_components.fortum.const import (
     CONF_CREATE_DASHBOARD,
     CONF_DEBUG_LOGGING,
+    CONF_IMPORT_PARTIAL_HOURLY_DATA,
     DOMAIN,
 )
 from custom_components.fortum.exceptions import (
@@ -38,7 +39,8 @@ from custom_components.fortum.models import MeteringPoint
 class TestInit:
     """Test integration setup and teardown."""
 
-    async def test_async_setup_entry_success(self, mock_hass):
+    @pytest.mark.parametrize("partial_imports", [None, False, True])
+    async def test_async_setup_entry_success(self, mock_hass, partial_imports):
         """Test successful setup."""
         entry = AsyncMock(spec=ConfigEntry)
         entry.data = {
@@ -46,7 +48,11 @@ class TestInit:
             CONF_PASSWORD: "test_password",
         }
         entry.entry_id = "test_entry_id"
-        entry.options = {}
+        entry.options = (
+            {}
+            if partial_imports is None
+            else {CONF_IMPORT_PARTIAL_HOURLY_DATA: partial_imports}
+        )
         entry.add_update_listener = Mock(return_value=Mock())
         entry.async_on_unload = Mock()
 
@@ -115,6 +121,11 @@ class TestInit:
             if scheduled_tasks:
                 await asyncio.gather(*scheduled_tasks)
 
+            mock_api.assert_called_once_with(
+                mock_hass,
+                mock_auth_instance,
+                import_partial_hourly_data=bool(partial_imports),
+            )
             assert result is True
             assert DOMAIN in mock_hass.data
             assert entry.entry_id in mock_hass.data[DOMAIN]

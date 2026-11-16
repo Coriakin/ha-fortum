@@ -19,7 +19,11 @@
           "create_current_month_sensors": "Create current month consumption & cost sensors",
           "debug_entities": "Show debug entities",
           "debug_logging": "Enable detailed debug logging",
-          "force_short_token_lifetime": "Force short token lifetime (15 minutes)"
+          "force_short_token_lifetime": "Force short token lifetime (15 minutes)",
+          "import_partial_hourly_data": "Import available hourly readings"
+        },
+        "data_description": {
+          "import_partial_hourly_data": "Import consumption even when pricing is delayed. Consumption and cost may cover different hours. Missing readings are not treated as zero. Turning this off keeps previously imported readings."
         }
       }
     }
@@ -36,7 +40,11 @@
           "create_current_month_sensors": "Create current month consumption & cost sensors",
           "debug_entities": "Show debug entities",
           "debug_logging": "Enable detailed debug logging",
-          "force_short_token_lifetime": "Force short token lifetime (15 minutes)"
+          "force_short_token_lifetime": "Force short token lifetime (15 minutes)",
+          "import_partial_hourly_data": "Import available hourly readings"
+        },
+        "data_description": {
+          "import_partial_hourly_data": "Import consumption even when pricing is delayed. Consumption and cost may cover different hours. Missing readings are not treated as zero. Turning this off keeps previously imported readings."
         }
       }
     }

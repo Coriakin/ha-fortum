@@ -50,6 +50,9 @@ This integration is available in the default HACS repository.
 
 ### Integration Options
 
+Change these under Settings -> Devices & Services -> Fortum -> Configure.
+
+- **Import available hourly readings** (off by default): Imports each supplied hourly metric independently when enabled. Consumption can arrive before price or cost, so their totals may cover different hours.
 - **Create Fortum dashboard**: Auto-creates a Fortum dashboard when missing.
 - **Create current month consumption & cost sensors**: Adds optional month-to-date consumption and cost sensors per metering point.
 
@@ -78,10 +81,14 @@ For dashboard behavior and strategy options, see `docs/dashboard.md`.
 
 ## Hourly Data Semantics
 
-- Consumption is imported whenever an explicit `ENERGY` reading exists, including zero, even if `price` and `cost` are not available yet.
-- Empty energy lists are missing consumption, not zero. Price and cost are imported only when supplied; previously recorded metrics are retained if a later response omits them.
+- By default, an hour is imported only when consumption, cost, and price are all supplied. Partial hours are skipped and logged as an `inconsistent` gap warning.
+- Enable **Import available hourly readings** to import each supplied metric independently. An explicit `ENERGY` reading establishes consumption availability, including zero, even if price and cost have not arrived.
+- Empty energy lists and lists containing only other energy types are missing consumption, not zero. Missing price and cost are never replaced with zero; supplied zero and negative values are retained.
+- Previously recorded readings are preserved in both modes when a later response omits a metric. Changing the option affects incoming readings; it does not clear statistics or require Energy Dashboard changes.
+- You can enable the option after restarting Home Assistant; there is no activation deadline to preserve recorded readings. The existing sync/backfill schedule revisits missing pricing and can import available consumption then, provided Fortum still supplies that history. Older gaps may take longer to catch up.
 - `temperatureReading` alone does not make an hour eligible for import.
-- Price coverage still drives historical catch-up and gap polling, so missing pricing is revisited even when consumption has already been imported.
+- Price coverage still drives historical catch-up and gap polling, so missing pricing is revisited even when consumption has already been imported. Accounts that never receive pricing may repeatedly fetch the same history.
+- **Statistics Last Data** reports the newest recorded consumption hour, not completeness of price or cost data.
 
 ## Entities
 
@@ -96,6 +103,7 @@ The integration creates these regular entities:
 - **Current Month Consumption <metering_point_no>** (`sensor`, optional): Month-to-date consumption per metering point, updated by hourly statistics sync when the current-month option is enabled.
 - **Current Month Cost <metering_point_no>** (`sensor`, optional): Month-to-date cost per metering point, updated by hourly statistics sync when the current-month option is enabled.
 - **Statistics Last Sync** (`sensor`, diagnostic): Timestamp of the latest successful hourly statistics sync.
+- **Statistics Last Data <metering_point_no>** (`sensor`, diagnostic): Start of the newest hour with recorded consumption statistics per metering point. Shows how far behind Fortum data is, even when syncs succeed or fail.
 
 Additionally, it imports hourly Recorder statistics for each available metering point:
 

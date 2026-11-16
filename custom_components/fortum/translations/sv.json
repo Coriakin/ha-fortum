@@ -19,7 +19,11 @@
           "create_current_month_sensors": "Skapa sensorer for aktuell manads forbrukning och kostnad",
           "debug_entities": "Visa debug-entiteter",
           "debug_logging": "Aktivera detaljerad debug-loggning",
-          "force_short_token_lifetime": "Tvinga kort tokenlivslangd (15 minuter)"
+          "force_short_token_lifetime": "Tvinga kort tokenlivslangd (15 minuter)",
+          "import_partial_hourly_data": "Importera tillgängliga timvärden"
+        },
+        "data_description": {
+          "import_partial_hourly_data": "Importera förbrukning även när prisuppgifter är försenade. Förbrukning och kostnad kan omfatta olika timmar. Saknade värden behandlas inte som noll. Tidigare importerade värden behålls om du stänger av detta."
         }
       }
     }
@@ -36,7 +40,11 @@
           "create_current_month_sensors": "Skapa sensorer for aktuell manads forbrukning och kostnad",
           "debug_entities": "Visa debug-entiteter",
           "debug_logging": "Aktivera detaljerad debug-loggning",
-          "force_short_token_lifetime": "Tvinga kort tokenlivslangd (15 minuter)"
+          "force_short_token_lifetime": "Tvinga kort tokenlivslangd (15 minuter)",
+          "import_partial_hourly_data": "Importera tillgängliga timvärden"
+        },
+        "data_description": {
+          "import_partial_hourly_data": "Importera förbrukning även när prisuppgifter är försenade. Förbrukning och kostnad kan omfatta olika timmar. Saknade värden behandlas inte som noll. Tidigare importerade värden behålls om du stänger av detta."
         }
       }
     }

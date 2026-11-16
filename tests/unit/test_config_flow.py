@@ -21,12 +21,14 @@ from custom_components.fortum.const import (
     CONF_DEBUG_ENTITIES,
     CONF_DEBUG_LOGGING,
     CONF_FORCE_SHORT_TOKEN_LIFETIME,
+    CONF_IMPORT_PARTIAL_HOURLY_DATA,
     CONF_REGION,
     DEFAULT_CREATE_CURRENT_MONTH_SENSORS,
     DEFAULT_CREATE_DASHBOARD,
     DEFAULT_DEBUG_ENTITIES,
     DEFAULT_DEBUG_LOGGING,
     DEFAULT_FORCE_SHORT_TOKEN_LIFETIME,
+    DEFAULT_IMPORT_PARTIAL_HOURLY_DATA,
 )
 from custom_components.fortum.exceptions import AuthenticationError, FortumError
 
@@ -68,6 +70,7 @@ class TestFortumConfigFlow:
             CONF_DEBUG_ENTITIES: True,
             CONF_DEBUG_LOGGING: True,
             CONF_FORCE_SHORT_TOKEN_LIFETIME: True,
+            CONF_IMPORT_PARTIAL_HOURLY_DATA: True,
         }
 
         result = await config_flow.async_step_user(user_input)
@@ -85,6 +88,7 @@ class TestFortumConfigFlow:
             CONF_DEBUG_ENTITIES: True,
             CONF_DEBUG_LOGGING: True,
             CONF_FORCE_SHORT_TOKEN_LIFETIME: True,
+            CONF_IMPORT_PARTIAL_HOURLY_DATA: True,
         }
 
     @patch("custom_components.fortum.config_flow.validate_input")
@@ -109,6 +113,7 @@ class TestFortumConfigFlow:
             CONF_DEBUG_ENTITIES: DEFAULT_DEBUG_ENTITIES,
             CONF_DEBUG_LOGGING: DEFAULT_DEBUG_LOGGING,
             CONF_FORCE_SHORT_TOKEN_LIFETIME: DEFAULT_FORCE_SHORT_TOKEN_LIFETIME,
+            CONF_IMPORT_PARTIAL_HOURLY_DATA: DEFAULT_IMPORT_PARTIAL_HOURLY_DATA,
         }
 
     @patch("custom_components.fortum.config_flow.validate_input")
@@ -287,6 +292,7 @@ class TestFortumOptionsFlow:
                 CONF_DEBUG_ENTITIES: True,
                 CONF_DEBUG_LOGGING: True,
                 CONF_FORCE_SHORT_TOKEN_LIFETIME: True,
+                CONF_IMPORT_PARTIAL_HOURLY_DATA: True,
             }
         )
 
@@ -297,5 +303,37 @@ class TestFortumOptionsFlow:
             CONF_DEBUG_ENTITIES: True,
             CONF_DEBUG_LOGGING: True,
             CONF_FORCE_SHORT_TOKEN_LIFETIME: True,
+            CONF_IMPORT_PARTIAL_HOURLY_DATA: True,
         }
         flow.hass.config_entries.async_update_entry.assert_called_once()
+
+
+@pytest.mark.parametrize("saved", [None, False, True])
+async def test_partial_import_option_defaults_and_can_be_changed(saved):
+    """An existing entry defaults off; both directions persist without data loss."""
+    entry = Mock()
+    entry.data = {
+        CONF_USERNAME: "test_user",
+        CONF_PASSWORD: "test_password",
+        CONF_REGION: "se",
+    }
+    entry.options = {"unrelated_option": "keep"}
+    if saved is not None:
+        entry.options[CONF_IMPORT_PARTIAL_HOURLY_DATA] = saved
+    flow = OptionsFlowHandler(entry)
+    flow.hass = Mock()
+    form = await flow.async_step_init()
+    values = form["data_schema"]({})
+    assert values[CONF_IMPORT_PARTIAL_HOURLY_DATA] is bool(saved)
+    values[CONF_IMPORT_PARTIAL_HOURLY_DATA] = not bool(saved)
+    result = await flow.async_step_init(values)
+    assert result["data"][CONF_IMPORT_PARTIAL_HOURLY_DATA] is not bool(saved)
+    assert result["data"]["unrelated_option"] == "keep"
+    flow.hass.config_entries.async_update_entry.assert_called_once_with(
+        entry, data=entry.data, options=result["data"]
+    )
+
+
+def test_partial_import_option_defaults_off_in_setup_schema():
+    values = STEP_USER_DATA_SCHEMA({CONF_USERNAME: "user", CONF_PASSWORD: "password"})
+    assert values[CONF_IMPORT_PARTIAL_HOURLY_DATA] is False

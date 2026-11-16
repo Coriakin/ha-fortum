@@ -18,12 +18,14 @@ from .const import (
     CONF_DEBUG_ENTITIES,
     CONF_DEBUG_LOGGING,
     CONF_FORCE_SHORT_TOKEN_LIFETIME,
+    CONF_IMPORT_PARTIAL_HOURLY_DATA,
     CONF_REGION,
     DEFAULT_CREATE_CURRENT_MONTH_SENSORS,
     DEFAULT_CREATE_DASHBOARD,
     DEFAULT_DEBUG_ENTITIES,
     DEFAULT_DEBUG_LOGGING,
     DEFAULT_FORCE_SHORT_TOKEN_LIFETIME,
+    DEFAULT_IMPORT_PARTIAL_HOURLY_DATA,
     DEFAULT_REGION,
     DOMAIN,
     SUPPORTED_REGIONS,
@@ -44,6 +46,10 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
         vol.Optional(
             CONF_CREATE_CURRENT_MONTH_SENSORS,
             default=DEFAULT_CREATE_CURRENT_MONTH_SENSORS,
+        ): bool,
+        vol.Optional(
+            CONF_IMPORT_PARTIAL_HOURLY_DATA,
+            default=DEFAULT_IMPORT_PARTIAL_HOURLY_DATA,
         ): bool,
         vol.Optional(CONF_DEBUG_ENTITIES, default=DEFAULT_DEBUG_ENTITIES): bool,
         vol.Optional(CONF_DEBUG_LOGGING, default=DEFAULT_DEBUG_LOGGING): bool,
@@ -111,6 +117,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_REGION: user_input.get(CONF_REGION, DEFAULT_REGION),
                 }
                 entry_options = {
+                    CONF_IMPORT_PARTIAL_HOURLY_DATA: user_input.get(
+                        CONF_IMPORT_PARTIAL_HOURLY_DATA,
+                        DEFAULT_IMPORT_PARTIAL_HOURLY_DATA,
+                    ),
                     CONF_DEBUG_ENTITIES: user_input.get(
                         CONF_DEBUG_ENTITIES,
                         DEFAULT_DEBUG_ENTITIES,
@@ -180,6 +190,9 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             }
             new_options = {
                 **self._config_entry.options,
+                CONF_IMPORT_PARTIAL_HOURLY_DATA: user_input[
+                    CONF_IMPORT_PARTIAL_HOURLY_DATA
+                ],
                 CONF_DEBUG_ENTITIES: user_input[CONF_DEBUG_ENTITIES],
                 CONF_DEBUG_LOGGING: user_input[CONF_DEBUG_LOGGING],
                 CONF_FORCE_SHORT_TOKEN_LIFETIME: user_input[
@@ -229,6 +242,13 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                         default=self._config_entry.options.get(
                             CONF_CREATE_CURRENT_MONTH_SENSORS,
                             DEFAULT_CREATE_CURRENT_MONTH_SENSORS,
+                        ),
+                    ): bool,
+                    vol.Required(
+                        CONF_IMPORT_PARTIAL_HOURLY_DATA,
+                        default=self._config_entry.options.get(
+                            CONF_IMPORT_PARTIAL_HOURLY_DATA,
+                            DEFAULT_IMPORT_PARTIAL_HOURLY_DATA,
                         ),
                     ): bool,
                     vol.Required(

@@ -8,12 +8,14 @@ from homeassistant.const import Platform
 
 # Integration domain
 DOMAIN = "fortum"
+CONF_IMPORT_PARTIAL_HOURLY_DATA = "import_partial_hourly_data"
 CONF_REGION = "region"
 CONF_DEBUG_ENTITIES = "debug_entities"
 CONF_DEBUG_LOGGING = "debug_logging"
 CONF_FORCE_SHORT_TOKEN_LIFETIME = "force_short_token_lifetime"
 CONF_CREATE_DASHBOARD = "create_dashboard"
 CONF_CREATE_CURRENT_MONTH_SENSORS = "create_current_month_sensors"
+DEFAULT_IMPORT_PARTIAL_HOURLY_DATA = False
 DEFAULT_REGION = "se"
 DEFAULT_DEBUG_ENTITIES = False
 DEFAULT_DEBUG_LOGGING = False
@@ -88,6 +90,7 @@ TOMORROW_MAX_PRICE_TIME_SENSOR_KEY = "tomorrow_max_price_time"
 CURRENT_MONTH_CONSUMPTION_SENSOR_KEY = "current_month_consumption"
 CURRENT_MONTH_COST_SENSOR_KEY = "current_month_cost"
 STATS_LAST_SYNC_SENSOR_KEY = "statistics_last_sync"
+STATS_LAST_DATA_SENSOR_KEY = "statistics_last_data"
 RESYNC_HISTORICAL_STATS_BUTTON_KEY = "statistics_resync_historical"
 RECREATE_DASHBOARD_BUTTON_KEY = "dashboard_recreate"
 BACKFILL_HISTORICAL_GAPS_BUTTON_KEY = "statistics_backfill_historical_gaps"
